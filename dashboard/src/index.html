@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!--
+      Script sources stay tight; `unsafe-inline` is granted to styles only
+      because Motion sets inline style attributes on every animated element,
+      which CSP's style-src governs. Scripts are what matter here: this
+      renderer displays text IRA read off arbitrary web pages.
+
+      connect-src already allows what the bridge and LiveKit need in B/C, so
+      this header doesn't have to be revisited then.
+    -->
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="
+        default-src 'self';
+        script-src 'self';
+        style-src 'self' 'unsafe-inline';
+        font-src 'self' data:;
+        img-src 'self' data: blob:;
+        media-src 'self' blob:;
+        connect-src 'self' ws://localhost:* http://localhost:* http://127.0.0.1:* https://api.open-meteo.com wss://*.livekit.cloud;
+        object-src 'none';
+        base-uri 'self';
+        frame-src 'none';
+      "
+    />
+    <title>IRA</title>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="./main.tsx"></script>
+  </body>
+</html>

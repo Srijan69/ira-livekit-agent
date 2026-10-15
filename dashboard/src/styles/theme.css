@@ -1,0 +1,154 @@
+@import "tailwindcss";
+
+/* Bundled, never a CDN. A desktop app that flashes unstyled text when the
+   wifi drops is a bug you only ever find offline.
+
+   Latin subsets only. The bare `inter/400.css` entry pulls Cyrillic, Greek and
+   Vietnamese too -- around 300kB of fonts this UI has no glyphs from. */
+@import "@fontsource/inter/latin-400.css";
+@import "@fontsource/inter/latin-500.css";
+@import "@fontsource/inter/latin-600.css";
+@import "@fontsource/inter/latin-700.css";
+
+/* ---------------------------------------------------------------------------
+   Design tokens. Retuning the entire dashboard happens here and nowhere else.
+   --------------------------------------------------------------------------- */
+@theme {
+  --color-deep: #050b16;
+  --color-mid: #0a1628;
+  --color-surface: #0d1a2d;
+
+  --color-cyan: #22d3ee;
+  --color-blue: #2e7bff;
+  --color-ok: #22c55e;
+  --color-warn: #f59e0b;
+  --color-bad: #ef4444;
+
+  --color-text: #e8f1ff;
+  --color-dim: #8fa6c4;
+  --color-mute: #5a7290;
+
+  --font-sans: "Inter", system-ui, -apple-system, sans-serif;
+}
+
+:root {
+  /* Not in @theme: these are composite values (gradients, shadows, blurs)
+     rather than scale entries, so Tailwind has no namespace for them. */
+  --panel-bg: rgb(13 25 45 / 0.55);
+  --panel-stroke: rgb(80 160 255 / 0.12);
+  --panel-blur: 20px;
+  --glow-cyan: 0 0 40px rgb(34 211 238 / 0.25);
+  --glow-cyan-soft: 0 0 24px rgb(34 211 238 / 0.15);
+}
+
+@layer base {
+  html,
+  body,
+  #root {
+    height: 100%;
+    margin: 0;
+  }
+
+  body {
+    background: var(--color-deep);
+    color: var(--color-text);
+    font-family: var(--font-sans);
+    overflow: hidden;
+    /* A desktop app, not a web page: text selection on chrome is a tell. */
+    user-select: none;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  /* Opt selection back in where it's genuinely useful. */
+  input,
+  textarea,
+  [data-selectable] {
+    user-select: text;
+  }
+
+  ::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+  }
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  ::-webkit-scrollbar-thumb {
+    background: rgb(80 160 255 / 0.18);
+    border-radius: 3px;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background: rgb(80 160 255 / 0.3);
+  }
+
+  :focus-visible {
+    outline: 1px solid var(--color-cyan);
+    outline-offset: 2px;
+  }
+}
+
+@layer components {
+  /* The glass panel every card is built from. */
+  .panel {
+    background: var(--panel-bg);
+    backdrop-filter: blur(var(--panel-blur));
+    -webkit-backdrop-filter: blur(var(--panel-blur));
+    border: 1px solid var(--panel-stroke);
+    border-radius: 1rem;
+  }
+
+  /* Small caps section label -- "SYSTEM STATUS", "LISTENING...". */
+  .label-caps {
+    font-size: 0.625rem;
+    font-weight: 600;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    color: var(--color-mute);
+  }
+
+  /* Digits that must not jitter as they tick. */
+  .tnum {
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* Frameless window drag handling. The top bar drags; anything clickable
+     inside it must opt out or it becomes un-clickable. */
+  .drag-region {
+    -webkit-app-region: drag;
+  }
+  .no-drag {
+    -webkit-app-region: no-drag;
+  }
+}
+
+/* The orb's breathing cycle.
+   A CSS keyframe rather than a Motion animation on purpose: the amplitude
+   changes with session state, and swapping a Motion keyframe array restarts
+   the cycle -- a visible hitch on every state change. A custom property can
+   change mid-animation without interrupting it. */
+@keyframes orb-breathe {
+  0%,
+  100% {
+    transform: scale(1);
+  }
+  50% {
+    transform: scale(var(--orb-breathe, 1.03));
+  }
+}
+
+.orb-breathe {
+  animation: orb-breathe 4s ease-in-out infinite;
+  will-change: transform;
+}
+
+/* Honour the OS setting, and double as a kill switch if the motion ever reads
+   as busy. Cross-fades survive; rotation and breathing stop. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.15s !important;
+  }
+}

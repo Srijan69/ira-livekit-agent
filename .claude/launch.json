@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "ira-dashboard",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["run", "dev:web", "--prefix", "dashboard"],
+      "port": 5273
+    }
+  ]
+}

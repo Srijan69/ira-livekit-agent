@@ -23,6 +23,7 @@ node_modules/
 dashboard/out/
 dashboard/dist/
 dashboard/release/
+dashboard/shots/
 *.log
 
 # Claude Code
