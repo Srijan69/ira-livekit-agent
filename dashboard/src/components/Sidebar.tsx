@@ -20,7 +20,7 @@ export function Sidebar({
   onSelect: (id: NavId) => void;
 }) {
   return (
-    <nav className="panel flex w-[198px] shrink-0 flex-col py-3">
+    <nav className="panel flex w-[206px] shrink-0 flex-col py-3">
       <ul className="flex-1 space-y-0.5 px-2.5">
         {NAV_ITEMS.map((item, index) => {
           const isActive = item.id === active;
@@ -37,30 +37,35 @@ export function Sidebar({
                   ease: [0.22, 1, 0.36, 1],
                 }}
                 aria-current={isActive ? "page" : undefined}
-                className={`relative flex w-full items-center gap-3 rounded-xl px-3 py-2.5 text-left text-[13px] transition-colors ${
-                  isActive
-                    ? "bg-white/[0.07] font-medium text-text"
-                    : "text-dim hover:bg-white/[0.04] hover:text-text"
+                className={`relative flex w-full items-center gap-3.5 rounded-xl px-3.5 py-3 text-left text-[14px] transition-colors ${
+                  isActive ? "font-medium text-text" : "text-dim hover:bg-white/[0.04] hover:text-text"
                 }`}
               >
                 {isActive && (
                   <motion.span
-                    // One shared element across list items, so the accent
-                    // slides between entries instead of popping.
-                    layoutId="nav-accent"
-                    className="absolute inset-y-1.5 left-0 w-[2px] rounded-full bg-cyan"
-                    style={{ boxShadow: "var(--glow-cyan-soft)" }}
+                    // The glowing pill from the reference, as one shared
+                    // element across items, so it slides between entries
+                    // instead of popping.
+                    layoutId="nav-active"
+                    className="absolute inset-0 rounded-xl"
+                    style={{
+                      background:
+                        "linear-gradient(95deg, rgb(46 123 255 / 0.34) 0%, rgb(34 211 238 / 0.1) 100%)",
+                      border: "1px solid rgb(56 189 248 / 0.32)",
+                      boxShadow:
+                        "0 0 22px rgb(46 123 255 / 0.25), inset 0 1px 0 rgb(255 255 255 / 0.06)",
+                    }}
                     transition={{ type: "spring", stiffness: 420, damping: 34 }}
                   />
                 )}
                 <item.icon
-                  size={16}
+                  size={18}
                   strokeWidth={1.75}
-                  className={isActive ? "text-cyan" : ""}
+                  className={`relative ${isActive ? "text-white" : ""}`}
                 />
-                <span className="flex-1 truncate">{item.label}</span>
+                <span className="relative flex-1 truncate">{item.label}</span>
                 {!item.ready && (
-                  <span className="size-1 rounded-full bg-mute/50" aria-hidden />
+                  <span className="relative size-1 rounded-full bg-mute/50" aria-hidden />
                 )}
               </motion.button>
             </li>

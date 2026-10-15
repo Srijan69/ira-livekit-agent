@@ -6,7 +6,7 @@ import type { SystemStats } from "@shared/types";
 
 import { Panel, PanelHeader } from "./Panel";
 
-const RADIUS = 21;
+const RADIUS = 25;
 const CIRCUMFERENCE = 2 * Math.PI * RADIUS;
 
 /**
@@ -69,23 +69,23 @@ function Ring({
 
   return (
     <li className="flex flex-col items-center gap-1.5">
-      <div className="relative grid size-[54px] place-items-center">
-        <svg viewBox="0 0 54 54" className="absolute size-full -rotate-90">
+      <div className="relative grid size-[62px] place-items-center">
+        <svg viewBox="0 0 62 62" className="absolute size-full -rotate-90">
           <circle
-            cx="27"
-            cy="27"
+            cx="31"
+            cy="31"
             r={RADIUS}
             fill="none"
             stroke="rgb(255 255 255 / 0.07)"
-            strokeWidth="3.5"
+            strokeWidth="4"
           />
           <motion.circle
-            cx="27"
-            cy="27"
+            cx="31"
+            cy="31"
             r={RADIUS}
             fill="none"
             stroke={color}
-            strokeWidth="3.5"
+            strokeWidth="4"
             strokeLinecap="round"
             strokeDasharray={CIRCUMFERENCE}
             style={{
@@ -95,8 +95,8 @@ function Ring({
           />
         </svg>
         <div className="flex flex-col items-center leading-none">
-          <span className="label-caps !text-[7px] !tracking-[0.1em]">{label}</span>
-          <span className="tnum mt-0.5 text-[12px] font-semibold text-text">
+          <span className="label-caps !text-[7.5px] !tracking-[0.1em]">{label}</span>
+          <span className="tnum mt-0.5 text-[14px] font-semibold text-text">
             {children ?? (
               percent === null ? (
                 "--"

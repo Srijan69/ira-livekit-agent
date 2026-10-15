@@ -27,7 +27,7 @@ export function QuickActions({ onSend }: { onSend: (prompt: string) => void }) {
             }}
             whileHover={{ y: -2 }}
             whileTap={{ scale: 0.985 }}
-            className="group panel flex w-full flex-col items-start gap-2.5 px-3.5 py-3 text-left transition-shadow"
+            className="group panel flex w-full flex-col items-center gap-2.5 px-3 pt-4 pb-3.5 text-center transition-shadow"
             style={{
               background: `linear-gradient(150deg, ${action.accent}33 0%, rgb(13 25 45 / 0.6) 68%)`,
               borderColor: `${action.accent}4D`,
@@ -35,16 +35,20 @@ export function QuickActions({ onSend }: { onSend: (prompt: string) => void }) {
             }}
           >
             <span
-              className="grid size-8 place-items-center rounded-lg transition-transform group-hover:scale-105"
-              style={{ background: `${action.accent}26`, color: action.accent }}
+              className="grid size-10 place-items-center rounded-xl transition-transform group-hover:scale-105"
+              style={{
+                background: `${action.accent}26`,
+                color: action.accent,
+                boxShadow: `0 0 18px ${action.accent}33`,
+              }}
             >
-              <action.icon size={16} strokeWidth={1.9} />
+              <action.icon size={20} strokeWidth={1.8} />
             </span>
             <span className="leading-tight">
-              <span className="block text-[12.5px] font-semibold text-text">
+              <span className="block text-[13px] font-semibold text-text">
                 {action.label}
               </span>
-              <span className="block text-[10px] text-mute">{action.sub}</span>
+              <span className="mt-0.5 block text-[10.5px] text-dim">{action.sub}</span>
             </span>
           </motion.button>
         </li>
