@@ -1,0 +1,47 @@
+.env
+.env.*
+!.env.example
+.DS_Store
+__pycache__
+.idea
+KMS
+.venv
+.vscode
+*.egg-info
+.pytest_cache
+.ruff_cache
+
+# IRA's memory store. Personal facts about whoever runs the agent, so it never
+# belongs in a repo. The -wal and -shm sidecars come from WAL journal mode.
+ira_memory.db
+ira_memory.db-wal
+ira_memory.db-shm
+
+# Dashboard (Electron + Vite). node_modules and build output only -- the
+# source under dashboard/ is checked in.
+node_modules/
+dashboard/out/
+dashboard/dist/
+dashboard/release/
+*.log
+
+# Claude Code
+.claude/settings.local.json
+.claude/worktrees/
+
+# OpenAI Codex
+.codex/config.local.toml
+
+# Gemini CLI
+.gemini/history/
+.gemini/tmp/
+.gemini/google_accounts.json
+.gemini/installation_id
+.gemini/oauth_creds.json
+
+# Cursor
+.cursor/chat/
+.cursor/rules/*.local.mdc
+
+# GitHub CLI
+.github/personal-instructions.md
