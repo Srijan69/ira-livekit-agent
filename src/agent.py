@@ -1,11 +1,13 @@
 import asyncio
+import collections
 import importlib
+import json
 import logging
 import re
 import textwrap
 import threading
 import time
-from typing import Optional
+from typing import Callable, Optional
 
 from dotenv import load_dotenv
 from google.genai import types as genai_types
@@ -60,6 +62,15 @@ GEMINI_LIVE_MODEL = "gemini-2.5-flash-native-audio-latest"
 # feminine read is asked for in the instructions as well, since the voice name
 # alone does not pin it.
 GEMINI_VOICE = "Kore"
+
+#: Data topic carrying IRA's lifecycle states to the desktop dashboard.
+#: Namespaced so it can never collide with LiveKit's own `lk.*` topics.
+STATUS_TOPIC = "ira.status"
+
+#: Status events held while the room is still connecting. Bounded, oldest
+#: dropped first: a session slow to connect needs its latest state, not a
+#: growing record of its first.
+STATUS_BACKLOG = 32
 
 # How long the boss has to stop talking before Gemini decides the turn is over.
 #
@@ -957,16 +968,28 @@ def _attach_status_reporter(
         elif event.new_state == "listening":
             reporter.emit("LISTENING")
 
+    # call_id -> tool name. The end event carries only the call id, and the
+    # dashboard's LEARN cue needs to know *which* tool finished.
+    tool_names: dict[str, str] = {}
+
     def on_tool_update(event) -> None:
         update = getattr(event, "update", None)
         update_type = getattr(update, "type", "")
         if update_type == "tool_call_started":
-            reporter.emit("DELEGATING", "tool call")
+            call = getattr(update, "function_call", None)
+            name = getattr(call, "name", "") or "tool call"
+            call_id = getattr(call, "call_id", "")
+            if call_id:
+                tool_names[call_id] = name
+            reporter.emit("DELEGATING", name)
         elif update_type == "tool_call_updated":
             reporter.emit("RUNNING", getattr(update, "message", "tool progress"))
         elif update_type == "tool_call_ended":
             state = "DONE" if getattr(update, "status", "") == "done" else "ERROR"
-            reporter.emit(state, "tool call")
+            # A reconnect can deliver an end for a start this session never
+            # saw, so fall back to the old generic label rather than raising.
+            name = tool_names.pop(getattr(update, "call_id", ""), "tool call")
+            reporter.emit(state, name)
 
     for event_name, callback in (
         ("user_state_changed", on_user_state),
@@ -981,6 +1004,108 @@ def _attach_status_reporter(
             logger.debug("status event unavailable: %s", event_name, exc_info=True)
 
 
+def _room_options() -> room_io.RoomOptions:
+    """Room I/O for the session.
+
+    Split out from the entrypoint so it can be asserted on without starting a
+    job -- the text-input setting in particular is invisible when wrong: the
+    dashboard publishes to lk.chat, no handler is registered, and nothing
+    anywhere reports an error.
+    """
+    return room_io.RoomOptions(
+        audio_input=room_io.AudioInputOptions(
+            # Cleans up background noise before the audio reaches Gemini.
+            noise_cancellation=ai_coustics.audio_enhancement(
+                model=ai_coustics.EnhancerModel.QUAIL_VF_S
+            ),
+        ),
+        # Lets the dashboard's command bar reach her. The default handler for
+        # this topic interrupts whatever she is saying and generates a reply
+        # from the text, so typing behaves exactly like speaking -- which is
+        # the whole point of the bar, rather than it being a second, lesser
+        # input path with its own behaviour to maintain.
+        text_input=True,
+    )
+
+
+def _room_status_publisher(room) -> Callable[[dict], None]:
+    """Build an observer that mirrors lifecycle states onto a data topic.
+
+    The dashboard's orb follows states the agent already computes, rather than
+    a parallel system invented for the UI. What matters:
+
+    - **Scheduled, never awaited.** `emit` is synchronous and is called from
+      the audio path; blocking it on a network publish would stutter her
+      voice.
+    - **Ordered.** One lock across every send. Separate tasks racing could
+      deliver a tool's DONE ahead of its DELEGATING, and the dashboard would
+      show a finished tool as running until its safety net expired.
+    - **Reliable.** For the same reason: nothing corrects a lost DONE. The
+      stream is a handful of small messages per turn, so this costs nothing
+      measurable.
+    - **Held until connected.** The entrypoint emits before `ctx.connect()`,
+      and `room.local_participant` raises until then. Early events wait in a
+      bounded backlog and go out, in order, with the first one after connect.
+    """
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = None
+
+    held: collections.deque[bytes] = collections.deque(maxlen=STATUS_BACKLOG)
+    order = asyncio.Lock()
+    # Strong references: the event loop keeps only weak ones to tasks, so an
+    # unreferenced publish could be collected mid-flight.
+    in_flight: set[asyncio.Task] = set()
+
+    def connected() -> bool:
+        try:
+            return bool(room.isconnected())
+        except Exception:
+            return False
+
+    async def _send(payloads: list[bytes]) -> None:
+        async with order:
+            for payload in payloads:
+                try:
+                    await room.local_participant.publish_data(
+                        payload, topic=STATUS_TOPIC, reliable=True
+                    )
+                except Exception:
+                    # A dead room costs the orb, never the call.
+                    logger.debug("status publish failed", exc_info=True)
+
+    def _dispatch(target: asyncio.AbstractEventLoop, payload: bytes) -> None:
+        # Always runs on the event loop, so `held` has a single writer.
+        if not connected():
+            held.append(payload)
+            return
+        batch = [*held, payload]
+        held.clear()
+        task = target.create_task(_send(batch))
+        in_flight.add(task)
+        task.add_done_callback(in_flight.discard)
+
+    def publish(event: dict) -> None:
+        try:
+            payload = json.dumps(event).encode("utf-8")
+            target = loop or asyncio.get_event_loop()
+            try:
+                running = asyncio.get_running_loop()
+            except RuntimeError:
+                running = None
+
+            if running is target:
+                _dispatch(target, payload)
+            else:
+                # A worker thread emitted this -- the only safe way in.
+                target.call_soon_threadsafe(_dispatch, target, payload)
+        except Exception:
+            logger.debug("status publish could not be scheduled", exc_info=True)
+
+    return publish
+
+
 @server.rtc_session(agent_name="my-agent")
 async def my_agent(ctx: JobContext):
     # Add any other context you want in all log entries here
@@ -993,7 +1118,12 @@ async def my_agent(ctx: JobContext):
     # detection decides when the user has stopped speaking. (The pipeline-only
     # options -- expressive mode and preemptive generation -- are likewise
     # inapplicable here; expressive mode needs a markup-capable TTS.)
-    reporter = SessionStatusReporter()
+    # The terminal sink is unchanged -- these lines are diagnostics the
+    # project already relies on. The observer is additive: it mirrors the same
+    # states onto a data topic so the dashboard's orb follows what she is
+    # actually doing, rather than a second state machine that could disagree
+    # with this one.
+    reporter = SessionStatusReporter(observer=_room_status_publisher(ctx.room))
     reporter.emit("LISTENING", "session starting")
     session = AgentSession()
 
@@ -1034,14 +1164,7 @@ async def my_agent(ctx: JobContext):
             reporter=reporter,
         ),
         room=ctx.room,
-        room_options=room_io.RoomOptions(
-            audio_input=room_io.AudioInputOptions(
-                # Cleans up background noise before the audio reaches Gemini.
-                noise_cancellation=ai_coustics.audio_enhancement(
-                    model=ai_coustics.EnhancerModel.QUAIL_VF_S
-                ),
-            ),
-        ),
+        room_options=_room_options(),
     )
 
     _attach_status_reporter(session, reporter)

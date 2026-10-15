@@ -7,13 +7,14 @@ import { QuickActions } from "./components/QuickActions";
 import { Sidebar } from "./components/Sidebar";
 import { Stage } from "./components/Stage";
 import { SuggestionChips } from "./components/SuggestionChips";
+import { StatusBanner } from "./components/StatusBanner";
 import { SystemStatus } from "./components/SystemStatus";
 import { TopBar } from "./components/TopBar";
 import { UpcomingTasks } from "./components/UpcomingTasks";
 import { WeatherCard } from "./components/WeatherCard";
 import { useAnimationEnabled } from "./hooks/useAnimationEnabled";
 import { useClock } from "./hooks/useClock";
-import { useMockSession } from "./hooks/useMockSession";
+import { useSession } from "./hooks/useSession";
 import { useSystemStats } from "./hooks/useSystemStats";
 import { MOCK_TASKS, MOCK_WEATHER, type Task } from "./lib/mock";
 import type { NavId } from "./lib/nav";
@@ -30,7 +31,7 @@ export function App() {
 
   const stats = useSystemStats();
   const animate = useAnimationEnabled();
-  const session = useMockSession();
+  const session = useSession();
 
   // Mock until the bridge exists in sub-project C. The handler is already the
   // real one, so only the data source changes.
@@ -52,6 +53,8 @@ export function App() {
           micEnabled={session.micEnabled}
           onToggleMic={session.toggleMic}
         />
+
+        <StatusBanner error={session.error} />
 
         <div className="flex min-h-0 flex-1 gap-3.5 px-5 pb-4">
           <Sidebar active={page} onSelect={setPage} />

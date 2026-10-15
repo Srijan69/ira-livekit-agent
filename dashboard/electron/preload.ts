@@ -1,15 +1,19 @@
 import { contextBridge, ipcRenderer } from "electron";
 
-import type { SystemStats } from "./system";
+import type {
+  HealthResult,
+  ProcessSnapshot,
+  ProcessStatus,
+  SystemStats,
+  TokenResult,
+} from "../shared/types";
 
 // The complete surface the renderer may touch. Nothing here hands out a
 // module -- each entry is one named operation, so the renderer can never
 // reach `fs`, `child_process`, or `require`.
 //
-// Sub-project A exposes stats and window controls only. `agent`, `bridgePort`
-// and `settings` from the design land with the bridge in B/C. They are absent
-// rather than stubbed: a method that exists and returns null leaves the UI
-// unable to tell "not built yet" from "broken".
+// Note what is absent: the bridge's port and shared secret. Main proxies every
+// bridge call, so a compromised renderer cannot mint a room token on its own.
 const api = {
   /** Subscribe to host stats. Returns an unsubscribe function. */
   onStats(listener: (stats: SystemStats) => void): () => void {
@@ -33,6 +37,34 @@ const api = {
     /** Resolves to the new always-on-top state. */
     toggleAlwaysOnTop(): Promise<boolean> {
       return ipcRenderer.invoke("ira:window:toggle-always-on-top");
+    },
+  },
+
+  session: {
+    /** Mint a room token. The dispatch for IRA is baked into it. */
+    token(room?: string): Promise<TokenResult> {
+      return ipcRenderer.invoke("ira:session:token", room);
+    },
+    /** Configuration preflight -- answers "why is nothing connecting". */
+    health(): Promise<HealthResult> {
+      return ipcRenderer.invoke("ira:health");
+    },
+  },
+
+  agent: {
+    status(): Promise<ProcessSnapshot> {
+      return ipcRenderer.invoke("ira:agent:status");
+    },
+    onStatus(listener: (status: ProcessStatus) => void): () => void {
+      const handler = (_event: unknown, status: ProcessStatus) => listener(status);
+      ipcRenderer.on("ira:agent:status-push", handler);
+      return () => ipcRenderer.removeListener("ira:agent:status-push", handler);
+    },
+    logs(): Promise<{ agent: string[]; bridge: string[] }> {
+      return ipcRenderer.invoke("ira:agent:logs");
+    },
+    restart(): Promise<void> {
+      return ipcRenderer.invoke("ira:agent:restart");
     },
   },
 };

@@ -1,27 +1,16 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
-import type { ConnectionState } from "@/components/ConnectionBadge";
-import { activeCuesFrom, orbStateFrom, type Cue, type OrbState } from "@/lib/orbState";
+import type { Session } from "@/lib/session";
+import { activeCuesFrom, orbStateFrom } from "@/lib/orbState";
 
 /**
- * The seam between the UI and IRA.
+ * A scripted session, for working on the UI without a voice connection.
  *
- * Sub-project B replaces this file with `useLiveKitSession`, returning this
- * exact shape. Everything downstream -- the orb, the cues, the waveform, the
- * command bar -- is written against the type rather than against LiveKit, so
- * swapping the source touches one import in App.
+ * Still used after sub-project B: the browser-only dev server has no Electron
+ * bridge and so cannot mint a token, and a dashboard frozen on "offline" is
+ * no use for animation work. `useSession` picks between this and the real
+ * hook at module load.
  */
-export type Session = {
-  connection: ConnectionState;
-  orbState: OrbState;
-  cues: Cue[];
-  micEnabled: boolean;
-  toggleMic: () => void;
-  /** Current output loudness, 0..1. Read once per animation frame. */
-  getLevel: () => number;
-  /** Sends text to IRA. Over `lk.chat` once there's a room. */
-  send: (text: string) => void;
-};
 
 /** The demo loop: how long to hold each phase, in milliseconds. */
 const SCRIPT: ReadonlyArray<{ phase: Phase; ms: number }> = [
@@ -109,11 +98,15 @@ export function useMockSession(): Session {
   const toggleMic = useCallback(() => setMicEnabled((on) => !on), []);
 
   const send = useCallback((text: string) => {
-    // Sub-project B replaces this with a `lk.chat` publish.
+    // Nobody to send to in the browser preview; the live session publishes
+    // on lk.chat instead.
     console.info("[mock session] would send to IRA:", text);
   }, []);
 
   return {
+    // Never an error: this session is scripted, so there is nothing to
+    // fail. The real hook is where connection problems surface.
+    error: null,
     connection: input.connection,
     orbState,
     cues,

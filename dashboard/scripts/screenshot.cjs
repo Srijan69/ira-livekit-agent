@@ -1,12 +1,14 @@
 // Captures the built dashboard to PNG, for visual review.
 //
-// Runs the real Electron app against the real build output and the real
-// preload bridge, so the stats rings show this machine's actual CPU rather
-// than a browser's "--". A separate entry point rather than a flag in
-// electron/main.ts: screenshot plumbing has no business in the app's own
-// startup path.
-//
+//   VITE_IRA_MOCK=1 npx electron-vite build   # scripted session: the orb moves
 //   npx electron scripts/screenshot.cjs
+//   npm run build                             # restore the real build after
+//
+// Renderer only, with a stand-in for main's stats IPC, so the rings show this
+// machine's real numbers. The mock build matters: the real build runs the live
+// session, which this harness cannot serve, so it would capture an error
+// banner. For the full stack -- supervisor, bridge, live agent -- use
+// scripts/e2e-probe.cjs instead.
 //
 // Several frames at different delays, because the orb walks through its state
 // machine on a loop -- one frame would only ever show one state.

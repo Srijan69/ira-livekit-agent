@@ -9,8 +9,9 @@
       which CSP's style-src governs. Scripts are what matter here: this
       renderer displays text IRA read off arbitrary web pages.
 
-      connect-src already allows what the bridge and LiveKit need in B/C, so
-      this header doesn't have to be revisited then.
+      connect-src covers LiveKit Cloud over both wss (signalling) and https
+      (livekit-client's region lookup and connection validation). WebRTC media
+      itself is not governed by CSP.
     -->
     <meta
       http-equiv="Content-Security-Policy"
@@ -21,7 +22,7 @@
         font-src 'self' data:;
         img-src 'self' data: blob:;
         media-src 'self' blob:;
-        connect-src 'self' ws://localhost:* http://localhost:* http://127.0.0.1:* https://api.open-meteo.com wss://*.livekit.cloud;
+        connect-src 'self' ws://localhost:* http://localhost:* http://127.0.0.1:* https://api.open-meteo.com wss://*.livekit.cloud https://*.livekit.cloud;
         object-src 'none';
         base-uri 'self';
         frame-src 'none';

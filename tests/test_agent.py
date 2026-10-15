@@ -15,6 +15,7 @@ Full multi-turn conversations are covered separately by the simulations in
 scenarios.yaml (see README.md).
 """
 
+import asyncio
 import json
 import os
 import sys
@@ -30,11 +31,15 @@ from agent import (
     GEMINI_LIVE_MODEL,
     GEMINI_VOICE,
     PREWARM_IMPORTS,
+    STATUS_BACKLOG,
+    STATUS_TOPIC,
     Assistant,
     _format_seed_facts,
     _is_console_key_listener_interrupt,
     _launch_via_start_menu,
     _prewarm,
+    _room_options,
+    _room_status_publisher,
     _sanitize_app_name,
     server,
 )
@@ -989,3 +994,302 @@ async def test_calls_open_app_when_asked_to_open_something() -> None:
     call = result.expect.contains_function_call(name="open_app").event()
     arguments = json.loads(call.item.arguments)
     assert arguments["app_name"].strip().lower() == "notepad"
+
+
+# ---------------------------------------------------------------------------
+# Desktop dashboard wiring (sub-project B)
+#
+# The dashboard reaches IRA two ways: typed commands arrive as ordinary user
+# turns, and her lifecycle states go back out over a data topic so the orb can
+# follow them. Both are agent behaviour, so both get tests.
+# ---------------------------------------------------------------------------
+
+
+def test_text_input_is_enabled_so_the_command_bar_works() -> None:
+    """Typing in the dashboard must reach her as a real turn.
+
+    `RoomOptions` leaves `text_input` NOT_GIVEN by default, which registers no
+    handler for the lk.chat topic -- the command bar would publish into
+    silence, with no error anywhere to explain it.
+    """
+    options = _room_options()
+    assert options.text_input is not NOT_GIVEN
+    assert options.text_input is not False
+
+
+def test_noise_cancellation_survives_the_text_input_change() -> None:
+    # Guard against the obvious regression: rebuilding RoomOptions to add
+    # text input and dropping the audio enhancement while doing it.
+    options = _room_options()
+    assert options.audio_input is not NOT_GIVEN
+    assert options.audio_input.noise_cancellation is not None
+
+
+class _FakeParticipant:
+    def __init__(self) -> None:
+        self.published: list[tuple[bytes, str, bool]] = []
+
+    async def publish_data(self, payload, *, topic="", reliable=True, **_kwargs):
+        self.published.append((payload, topic, reliable))
+
+
+class _FakeRoom:
+    def __init__(self, participant=None) -> None:
+        self.local_participant = participant or _FakeParticipant()
+
+    def isconnected(self) -> bool:
+        return True
+
+
+class _ConnectableRoom:
+    """Raises on `local_participant` until connected, as `rtc.Room` does."""
+
+    def __init__(self) -> None:
+        self.connected = False
+        self._participant = _FakeParticipant()
+
+    def isconnected(self) -> bool:
+        return self.connected
+
+    @property
+    def local_participant(self):
+        if not self.connected:
+            raise Exception("cannot access local participant before connecting")
+        return self._participant
+
+
+async def test_status_publisher_sends_json_on_the_status_topic() -> None:
+    """A fake room, never a real one.
+
+    Same rule the browser and memory suites follow: these tests must not open
+    a session, a window, or a socket.
+    """
+    room = _FakeRoom()
+    publish = _room_status_publisher(room)
+
+    publish({"run_id": "abc", "state": "DELEGATING", "detail": "open_app", "at": 1.0})
+    # Drain rather than yield once: how many loop iterations the publish
+    # takes is an implementation detail this test should not encode.
+    await asyncio.sleep(0.01)
+
+    assert len(room.local_participant.published) == 1
+    payload, topic, reliable = room.local_participant.published[0]
+    assert topic == STATUS_TOPIC
+    # Reliable: the dashboard pairs each tool's DELEGATING with its DONE, and
+    # nothing corrects a lost DONE -- the orb would show a finished tool as
+    # running until its thirty-second safety net expired.
+    assert reliable is True
+
+    event = json.loads(payload.decode())
+    assert event["state"] == "DELEGATING"
+    assert event["detail"] == "open_app"
+
+
+async def test_status_publisher_never_raises_into_the_session() -> None:
+    """A dead room must cost the orb, not the call."""
+
+    class _BrokenRoom:
+        class local_participant:  # noqa: N801
+            @staticmethod
+            async def publish_data(*_args, **_kwargs):
+                raise RuntimeError("room closed")
+
+        def isconnected(self) -> bool:
+            return True
+
+    publish = _room_status_publisher(_BrokenRoom())
+    publish({"run_id": "abc", "state": "ERROR", "detail": "", "at": 1.0})
+    await asyncio.sleep(0.01)
+
+
+async def test_reporter_wired_to_a_room_publishes_its_states() -> None:
+    """End to end through the real reporter, with a fake room.
+
+    This is the path the orb depends on: SessionStatusReporter -> observer ->
+    data topic. Testing the publisher alone would not catch the reporter and
+    the publisher being wired up with mismatched shapes.
+    """
+    room = _FakeRoom()
+    reporter = SessionStatusReporter(
+        run_id="run-1", sink=lambda _: None, observer=_room_status_publisher(room)
+    )
+
+    reporter.emit("SPEAKING")
+    await asyncio.sleep(0.01)
+
+    event = json.loads(room.local_participant.published[0][0].decode())
+    assert event["state"] == "SPEAKING"
+    assert event["run_id"] == "run-1"
+
+
+def _tool_events(callbacks):
+    """Drive the reporter's tool callback with the SDK's real event shapes."""
+    from types import SimpleNamespace
+
+    def started(call_id: str, name: str):
+        return SimpleNamespace(
+            update=SimpleNamespace(
+                type="tool_call_started",
+                function_call=SimpleNamespace(call_id=call_id, name=name),
+            )
+        )
+
+    def ended(call_id: str, status: str):
+        return SimpleNamespace(
+            update=SimpleNamespace(
+                type="tool_call_ended", id=call_id, call_id=call_id, status=status
+            )
+        )
+
+    return started, ended
+
+
+def test_status_reporter_names_the_tool_that_started() -> None:
+    """The dashboard's LEARN cue lights for memory-writing tools by name.
+
+    The reporter used to emit the literal string "tool call", which discarded
+    the one fact the cue needs -- `ToolCallStarted.function_call.name` was
+    right there on the event.
+    """
+    callbacks = {}
+
+    class FakeSession:
+        def on(self, name, callback):
+            callbacks[name] = callback
+
+    events: list[dict] = []
+    from agent import _attach_status_reporter
+
+    _attach_status_reporter(
+        FakeSession(),
+        SessionStatusReporter(sink=lambda _: None, observer=events.append),
+    )
+    started, _ = _tool_events(callbacks)
+    callbacks["tool_execution_updated"](started("call-1", "remember"))
+
+    assert events[-1]["state"] == "DELEGATING"
+    assert events[-1]["detail"] == "remember"
+
+
+def test_status_reporter_names_the_tool_that_ended() -> None:
+    """The end event carries only a call id, so the name is remembered from
+    the start event rather than lost."""
+    callbacks = {}
+
+    class FakeSession:
+        def on(self, name, callback):
+            callbacks[name] = callback
+
+    events: list[dict] = []
+    from agent import _attach_status_reporter
+
+    _attach_status_reporter(
+        FakeSession(),
+        SessionStatusReporter(sink=lambda _: None, observer=events.append),
+    )
+    started, ended = _tool_events(callbacks)
+    callbacks["tool_execution_updated"](started("call-1", "open_app"))
+    callbacks["tool_execution_updated"](ended("call-1", "done"))
+    callbacks["tool_execution_updated"](started("call-2", "read_page"))
+    callbacks["tool_execution_updated"](ended("call-2", "error"))
+
+    assert (events[1]["state"], events[1]["detail"]) == ("DONE", "open_app")
+    assert (events[3]["state"], events[3]["detail"]) == ("ERROR", "read_page")
+
+
+def test_status_reporter_survives_an_end_without_a_start() -> None:
+    # A reconnect can deliver an end for a call this session never saw start.
+    callbacks = {}
+
+    class FakeSession:
+        def on(self, name, callback):
+            callbacks[name] = callback
+
+    events: list[dict] = []
+    from agent import _attach_status_reporter
+
+    _attach_status_reporter(
+        FakeSession(),
+        SessionStatusReporter(sink=lambda _: None, observer=events.append),
+    )
+    _, ended = _tool_events(callbacks)
+    callbacks["tool_execution_updated"](ended("never-started", "done"))
+
+    assert events[-1]["state"] == "DONE"
+    assert events[-1]["detail"] == "tool call"
+
+
+async def test_status_publisher_holds_events_until_the_room_connects() -> None:
+    """Found running the real app end to end.
+
+    The entrypoint emits "session starting" before `ctx.connect()`, and
+    `room.local_participant` raises until the room is connected -- so that
+    first state was lost, with a traceback in her log on every session start.
+    Events are now held while disconnected and flushed, in order, once
+    connected.
+    """
+    room = _ConnectableRoom()
+    publish = _room_status_publisher(room)
+
+    publish(
+        {"run_id": "a", "state": "LISTENING", "detail": "session starting", "at": 1.0}
+    )
+    await asyncio.sleep(0.01)
+    assert room._participant.published == []
+
+    room.connected = True
+    publish({"run_id": "a", "state": "GENERATING", "detail": "", "at": 2.0})
+    await asyncio.sleep(0.01)
+
+    states = [json.loads(p)["state"] for p, _, _ in room._participant.published]
+    assert states == ["LISTENING", "GENERATING"]
+
+
+async def test_status_publisher_bounds_what_it_holds() -> None:
+    """A room slow to connect must not grow the backlog without limit.
+
+    Oldest go first: after a long connect the orb needs the latest state, not
+    the first.
+    """
+    room = _ConnectableRoom()
+    publish = _room_status_publisher(room)
+    for n in range(STATUS_BACKLOG * 3):
+        publish({"run_id": "a", "state": "RUNNING", "detail": str(n), "at": float(n)})
+
+    room.connected = True
+    publish({"run_id": "a", "state": "DONE", "detail": "last", "at": 999.0})
+    await asyncio.sleep(0.01)
+
+    details = [json.loads(p)["detail"] for p, _, _ in room._participant.published]
+    assert len(details) == STATUS_BACKLOG + 1
+    assert details[0] == str(STATUS_BACKLOG * 2)
+    assert details[-1] == "last"
+
+
+async def test_status_publisher_keeps_order_when_a_send_is_slow() -> None:
+    """DONE must never overtake its DELEGATING.
+
+    Each event used to go out as its own task, so a slow first send let the
+    second one land first.
+    """
+
+    class _SlowFirstParticipant(_FakeParticipant):
+        def __init__(self) -> None:
+            super().__init__()
+            self.calls = 0
+
+        async def publish_data(self, payload, **kwargs):
+            self.calls += 1
+            if self.calls == 1:
+                await asyncio.sleep(0.02)
+            await super().publish_data(payload, **kwargs)
+
+    room = _FakeRoom(_SlowFirstParticipant())
+    publish = _room_status_publisher(room)
+
+    publish({"run_id": "a", "state": "DELEGATING", "detail": "open_app", "at": 1.0})
+    publish({"run_id": "a", "state": "DONE", "detail": "open_app", "at": 2.0})
+    await asyncio.sleep(0.05)
+
+    states = [json.loads(p)["state"] for p, _, _ in room.local_participant.published]
+    assert states == ["DELEGATING", "DONE"]
