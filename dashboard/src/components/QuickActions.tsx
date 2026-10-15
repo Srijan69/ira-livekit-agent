@@ -29,8 +29,9 @@ export function QuickActions({ onSend }: { onSend: (prompt: string) => void }) {
             whileTap={{ scale: 0.985 }}
             className="group panel flex w-full flex-col items-start gap-2.5 px-3.5 py-3 text-left transition-shadow"
             style={{
-              background: `linear-gradient(150deg, ${action.accent}1F 0%, rgb(13 25 45 / 0.55) 62%)`,
-              borderColor: `${action.accent}33`,
+              background: `linear-gradient(150deg, ${action.accent}33 0%, rgb(13 25 45 / 0.6) 68%)`,
+              borderColor: `${action.accent}4D`,
+              boxShadow: `inset 0 1px 0 0 ${action.accent}1A`,
             }}
           >
             <span

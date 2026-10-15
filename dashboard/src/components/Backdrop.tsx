@@ -80,17 +80,17 @@ export function Backdrop() {
       >
         <defs>
           <linearGradient id="far-fade" x1="0" y1="0" x2="0" y2="1">
-            <stop offset="0%" stopColor="#0d2742" stopOpacity="0.55" />
-            <stop offset="100%" stopColor="#0d2742" stopOpacity="0.1" />
+            <stop offset="0%" stopColor="#1b4d7a" stopOpacity="0.7" />
+            <stop offset="100%" stopColor="#123a5e" stopOpacity="0.16" />
           </linearGradient>
           <linearGradient id="near-fade" x1="0" y1="0" x2="0" y2="1">
-            <stop offset="0%" stopColor="#081423" stopOpacity="0.92" />
-            <stop offset="100%" stopColor="#081423" stopOpacity="0.5" />
+            <stop offset="0%" stopColor="#0b1d30" stopOpacity="0.95" />
+            <stop offset="100%" stopColor="#0b1d30" stopOpacity="0.55" />
           </linearGradient>
         </defs>
 
         {/* Horizon haze -- the city's own light pollution. */}
-        <ellipse cx="50" cy="258" rx="70" ry="42" fill="#2a6fa8" opacity="0.16" />
+        <ellipse cx="50" cy="258" rx="74" ry="48" fill="#3f8fd0" opacity="0.26" />
 
         {far.map((b, i) => (
           <g key={`far-${i}`}>

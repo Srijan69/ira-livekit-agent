@@ -98,13 +98,29 @@ export function IraOrb({
         aria-hidden
         className="absolute left-1/2 -translate-x-1/2"
         style={{
-          bottom: -size * 0.1,
-          width: size * 0.74,
-          height: size * 0.17,
+          bottom: -size * 0.035,
+          width: size * 0.82,
+          height: size * 0.2,
           borderRadius: "50%",
-          background: `radial-gradient(ellipse at center, ${tint.ring}2E 0%, transparent 72%)`,
-          borderTop: `1px solid ${tint.ring}38`,
-          filter: "blur(1px)",
+          background: `radial-gradient(ellipse at center, ${tint.ring}3A 0%, ${tint.ring}12 45%, transparent 74%)`,
+          borderTop: `1.5px solid ${tint.ring}55`,
+          filter: "blur(0.5px)",
+          opacity: 0.4 + intensity * 0.5,
+          transition: "opacity 0.6s ease-out",
+        }}
+      />
+      {/* A second, tighter rim just under the core, which is what reads as the
+          orb resting on something rather than floating above a smudge. */}
+      <div
+        aria-hidden
+        className="absolute left-1/2 -translate-x-1/2"
+        style={{
+          bottom: size * 0.055,
+          width: size * 0.46,
+          height: size * 0.1,
+          borderRadius: "50%",
+          border: `1px solid ${tint.ring}40`,
+          background: `radial-gradient(ellipse at center, ${tint.ring}26 0%, transparent 70%)`,
           opacity: 0.35 + intensity * 0.5,
           transition: "opacity 0.6s ease-out",
         }}
@@ -170,7 +186,10 @@ export function IraOrb({
           ))}
         </motion.g>
 
-        {/* Inner: a thinner, faster broken ring. */}
+        {/* Inner: a thinner, faster broken ring, plus a solid hairline. The
+            reference reads as four or five distinct concentric bands, so the
+            layers are deliberately different weights rather than evenly
+            spaced copies. */}
         <motion.g style={{ rotate: inner, originX: "200px", originY: "200px" }}>
           <circle
             cx="200"
@@ -178,11 +197,24 @@ export function IraOrb({
             r="118"
             fill="none"
             stroke={tint.ring}
-            strokeWidth="2.5"
+            strokeWidth="3"
             strokeLinecap="round"
             pathLength={1}
             strokeDasharray="0.17 0.083"
-            opacity={0.3 + intensity * 0.55}
+            opacity={0.35 + intensity * 0.55}
+          />
+        </motion.g>
+        <motion.g style={{ rotate: mid, originX: "200px", originY: "200px" }}>
+          <circle
+            cx="200"
+            cy="200"
+            r="102"
+            fill="none"
+            stroke={tint.ring}
+            strokeWidth="1"
+            pathLength={1}
+            strokeDasharray="0.46 0.04"
+            opacity={0.22 + intensity * 0.35}
           />
         </motion.g>
 

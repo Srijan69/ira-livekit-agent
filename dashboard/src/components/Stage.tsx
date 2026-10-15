@@ -21,16 +21,14 @@ import {
  */
 function QuotePanel() {
   return (
-    // Absolutely positioned so it costs the layout no width. Laid out in flow
-    // it needed a matching spacer on the right to keep the orb centred, and
-    // the pair together overflowed the stage at the default window size --
-    // which is why it vanished entirely rather than just moving.
-    //
-    // The 800px threshold is sized so the centred orb group leaves more than
-    // this panel's width of clear space on each side. Below it, the panel
-    // hides rather than overlapping the cue column.
-    <div className="pointer-events-none absolute top-1/2 left-0 hidden w-[150px] -translate-y-1/2 flex-col gap-4 @[800px]:flex">
-      <svg viewBox="0 0 160 190" className="h-[164px] w-full" aria-hidden>
+    // Absolutely positioned it earlier, which kept the orb centred in the
+    // stage and left only ~110px of clear space each side -- capping the orb
+    // far below the reference's. In the reference this block is in flow on the
+    // left, which is what pushes the orb right of centre and gives it room to
+    // be the focal point. Back in flow, hidden rather than shrunk when the
+    // stage is too narrow to afford it.
+    <div className="hidden w-[170px] shrink-0 flex-col justify-center gap-4 @[780px]:flex">
+      <svg viewBox="0 0 160 190" className="h-[172px] w-full" aria-hidden>
         <g stroke="#2E7BFF" fill="none" strokeWidth="0.9" opacity="0.5">
           <circle cx="80" cy="62" r="34" />
           <circle cx="80" cy="62" r="22" opacity="0.6" />
@@ -152,39 +150,53 @@ export function Stage({
     // No horizontal padding here, deliberately: a container query measures the
     // *content* box, so `px-2` would silently shrink what the thresholds below
     // compare against by 16px.
-    <div className="@container relative flex min-h-0 min-w-0 flex-1 items-center justify-center gap-7">
+    <div className="@container flex min-h-0 min-w-0 flex-1 items-center gap-4">
       <QuotePanel />
-      <CueColumn cues={LEFT_CUES} active={cues} align="left" />
 
-      <div className="flex shrink-0 flex-col items-center justify-center">
-        <IraOrb state={state} animate={animate} size={264} />
+      {/* Cues and orb centre within whatever the quote block leaves, which is
+          what puts the orb right of the stage's own centre -- as in the
+          reference, rather than dead centre with a cramped orb. */}
+      <div className="flex min-w-0 flex-1 items-center justify-center gap-5">
+        <CueColumn cues={LEFT_CUES} active={cues} align="left" />
 
-        <div className="mt-5 flex h-4 items-center">
-          <AnimatePresence mode="wait">
-            <motion.p
-              key={shown}
-              initial={{ opacity: 0, y: 3 }}
-              animate={{ opacity: 1, y: 0 }}
-              exit={{ opacity: 0, y: -3 }}
-              transition={{ duration: 0.25 }}
-              className="label-caps !tracking-[0.3em]"
-              style={
-                state === "offline"
-                  ? undefined
-                  : { color: "#8FA6C4", textShadow: "0 0 14px rgb(34 211 238 / 0.3)" }
-              }
-            >
-              {shown}
-            </motion.p>
-          </AnimatePresence>
+        <div className="flex shrink-0 flex-col items-center justify-center">
+          <IraOrb state={state} animate={animate} size={400} />
+
+          <div className="mt-4 flex h-4 items-center">
+            <AnimatePresence mode="wait">
+              <motion.p
+                key={shown}
+                initial={{ opacity: 0, y: 3 }}
+                animate={{ opacity: 1, y: 0 }}
+                exit={{ opacity: 0, y: -3 }}
+                transition={{ duration: 0.25 }}
+                className="label-caps !tracking-[0.3em]"
+                style={
+                  state === "offline"
+                    ? undefined
+                    : {
+                        color: "#8FA6C4",
+                        textShadow: "0 0 14px rgb(34 211 238 / 0.3)",
+                      }
+                }
+              >
+                {shown}
+              </motion.p>
+            </AnimatePresence>
+          </div>
+
+          <div className="mt-3">
+            <Waveform
+              getLevel={getLevel}
+              active={waveActive && animate}
+              width={380}
+              height={52}
+            />
+          </div>
         </div>
 
-        <div className="mt-3">
-          <Waveform getLevel={getLevel} active={waveActive && animate} />
-        </div>
+        <CueColumn cues={RIGHT_CUES} active={cues} align="right" />
       </div>
-
-      <CueColumn cues={RIGHT_CUES} active={cues} align="right" />
     </div>
   );
 }
