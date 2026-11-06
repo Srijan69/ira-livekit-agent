@@ -1,0 +1,83 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Trending Financial Markets | Daily Overview</title>
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; margin: 24px; background: #f8fafc; color: #0f172a; }
+    h1 { font-size: 20px; margin-bottom: 16px; }
+    table { width: 100%; border-collapse: collapse; background: #ffffff; border-radius: 8px; overflow: hidden; box-shadow: 0 1px 3px rgba(0,0,0,0.1); margin-bottom: 32px; }
+    th, td { padding: 12px 16px; text-align: left; border-bottom: 1px solid #e2e8f0; font-size: 14px; }
+    th { background: #f1f5f9; font-weight: 600; color: #475569; }
+    .positive { color: #16a34a; font-weight: 600; }
+    .negative { color: #dc2626; font-weight: 600; }
+  </style>
+</head>
+<body>
+  <h1>Trending Equities & Assets</h1>
+
+  <!-- Primary Semantic Table (Yahoo Finance / Market Tracking Style) -->
+  <table id="trending-markets" class="markets-table yf-table" data-test="trending-table" aria-label="Trending Stocks">
+    <thead>
+      <tr>
+        <th scope="col">Symbol</th>
+        <th scope="col">Name</th>
+        <th scope="col">Current Price</th>
+        <th scope="col">24-hour Percentage Change</th>
+        <th scope="col">Volume</th>
+        <th scope="col">Market Cap</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr class="yf-row" data-test="market-row" data-symbol="NVDA">
+        <td class="symbol font-bold">NVDA</td>
+        <td class="name" data-field="name">NVIDIA Corporation</td>
+        <td class="price" data-field="price">$135.50</td>
+        <td class="change positive" data-field="change">+8.45%</td>
+        <td class="volume">48.2M</td>
+        <td class="market-cap">$3.32T</td>
+      </tr>
+      <tr class="yf-row" data-test="market-row" data-symbol="AAPL">
+        <td class="symbol font-bold">AAPL</td>
+        <td class="name" data-field="name">Apple Inc.</td>
+        <td class="price" data-field="price">$232.10</td>
+        <td class="change positive" data-field="change">+1.25%</td>
+        <td class="volume">52.1M</td>
+        <td class="market-cap">$3.55T</td>
+      </tr>
+      <tr class="yf-row" data-test="market-row" data-symbol="TSLA">
+        <td class="symbol font-bold">TSLA</td>
+        <td class="name" data-field="name">Tesla Inc.</td>
+        <td class="price" data-field="price">$218.80</td>
+        <td class="change positive" data-field="change">+12.30%</td>
+        <td class="volume">64.8M</td>
+        <td class="market-cap">$698.5B</td>
+      </tr>
+      <tr class="yf-row" data-test="market-row" data-symbol="MSFT">
+        <td class="symbol font-bold">MSFT</td>
+        <td class="name" data-field="name">Microsoft Corporation</td>
+        <td class="price" data-field="price">$425.00</td>
+        <td class="change negative" data-field="change">-0.65%</td>
+        <td class="volume">21.4M</td>
+        <td class="market-cap">$3.16T</td>
+      </tr>
+      <tr class="yf-row" data-test="market-row" data-symbol="AMZN">
+        <td class="symbol font-bold">AMZN</td>
+        <td class="name" data-field="name">Amazon.com Inc.</td>
+        <td class="price" data-field="price">$188.90</td>
+        <td class="change positive" data-field="change">+3.10%</td>
+        <td class="volume">35.6M</td>
+        <td class="market-cap">$1.96T</td>
+      </tr>
+      <tr class="yf-row" data-test="market-row" data-symbol="GOOGL">
+        <td class="symbol font-bold">GOOGL</td>
+        <td class="name" data-field="name">Alphabet Inc.</td>
+        <td class="price" data-field="price">$164.20</td>
+        <td class="change negative" data-field="change">-1.15%</td>
+        <td class="volume">19.8M</td>
+        <td class="market-cap">$2.04T</td>
+      </tr>
+    </tbody>
+  </table>
+</body>
+</html>

@@ -1,6 +1,6 @@
 # IRA user profile and durable context memory
 
-Status: approved by the user on November 6, 2026; implementation in progress.
+Status: implemented and verified locally on November 6, 2026 after user approval.
 Date: November 6, 2026.
 
 ## Requested outcome
@@ -242,3 +242,22 @@ The user explicitly invoked the brainstorming skill. Its implementation gate
 requires presenting the design and obtaining approval before writing runtime
 code. This proposal makes that approval concrete; the goal remains active until
 the requested implementation and verification are finished.
+
+## Implementation verification
+
+- 402 affected backend tests passed; four opt-in live-provider tests skipped.
+- 355 dashboard tests passed, with TypeScript and production Electron build clean.
+- Actual built Electron smoke verified profile save/reset/sidebar, all context
+  status labels, search/delete/clear, settings persistence and renderer reload.
+  Fifteen screenshots covered 1440×960 and 1180×800; no horizontal overflow.
+- A separate fresh-profile Electron smoke used the real bridge and confirmed
+  Connection and Keys retains four empty fields and no inherited provider keys.
+- Installed-SDK tests used synthetic transports for compaction, immediate
+  current-child events, failover, exhausted/raised restarts, no action replay,
+  revision races, orphan-tool recovery, ordered storage retry and profile bounds.
+- Runtime uses a compact equivalent policy and the installed Google's actual
+  tool configuration for estimates. Historical tool groups are paired inert text
+  in restored history, avoiding provider tool-result messages that could reply.
+- Network availability, quota and live voice quality were not tested using the
+  user's or project owner's keys. The configured summarizer's availability is
+  reported at runtime; the application budget is not full-model capacity.

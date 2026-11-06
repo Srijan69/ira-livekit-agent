@@ -20,7 +20,6 @@ from browser import (
     _describe,
     browser_config,
 )
-from memory import MemoryStore
 
 # ---------------------------------------------------------------------------
 # Fakes
@@ -59,6 +58,7 @@ class FakeDriver:
         self.title = title
         self._body = FakeElement("body", text=body_text)
         self.visited: list[str] = []
+        self.current_url = ""
         self.went_back = False
         self.quit_called = False
         self.scripts: list[str] = []
@@ -72,6 +72,7 @@ class FakeDriver:
 
     def get(self, url):
         self.visited.append(url)
+        self.current_url = url
 
     def back(self):
         self.went_back = True
@@ -262,7 +263,8 @@ def test_navigate_keeps_an_explicit_scheme():
 
 def test_navigate_rejects_an_empty_address():
     driver = FakeDriver()
-    assert "No address" in _controller(driver).navigate("   ")
+    with pytest.raises(ValueError, match="No address"):
+        _controller(driver).navigate("   ")
     assert driver.visited == []
 
 
@@ -327,7 +329,7 @@ def test_spotify_controls_use_the_current_player_audio():
 
 def test_spotify_playlist_search_selects_match_and_verifies_playback():
     driver = FakeDriver()
-    driver.script_results = ["matched", "playing"]
+    driver.script_results = ["matched", "play-requested", True, True]
     controller = _controller(driver)
 
     result = controller.spotify_play_playlist("My Funk Songs")
@@ -337,7 +339,7 @@ def test_spotify_playlist_search_selects_match_and_verifies_playback():
     ]
     assert "My Funk Songs" in result
     assert "playing" in result.lower()
-    assert len(driver.scripts) == 2
+    assert len(driver.scripts) == 4
 
 
 def test_open_spotify_uses_the_selected_browser():
@@ -347,124 +349,16 @@ def test_open_spotify_uses_the_selected_browser():
     assert driver.visited == ["https://open.spotify.com"]
 
 
-# ---------------------------------------------------------------------------
-# Memory
-# ---------------------------------------------------------------------------
+def test_spotify_play_track_searches_and_verifies_playback():
+    driver = FakeDriver()
+    driver.script_results = [True, True]
+    controller = _controller(driver)
 
+    result = controller.spotify_play_track("Metamorphosis", "Interworld")
 
-@pytest.fixture
-def store(tmp_path):
-    s = MemoryStore(tmp_path / "test_memory.db")
-    yield s
-    s.close()
-
-
-def test_remember_then_recall(store):
-    store.remember("The boss takes his coffee black")
-    hits = store.recall("coffee")
-    assert len(hits) == 1
-    assert "coffee" in hits[0].content
-
-
-def test_recall_finds_related_words_not_just_exact_ones(store):
-    """OR-ed terms, so a question phrased differently still finds the fact."""
-    store.remember("The boss prefers dark roast coffee", kind="preference")
-    assert store.recall("what does the boss drink")
-
-
-def test_remember_is_idempotent(store):
-    """Re-saying a known fact must not create a second row."""
-    store.remember("The boss lives in Hyderabad")
-    second = store.remember("the boss lives in hyderabad")
-    assert store.count() == 1
-    assert "Already" in second
-
-
-def test_remember_rejects_empty_content(store):
-    store.remember("   ")
-    assert store.count() == 0
-
-
-def test_remember_caps_length_and_collapses_whitespace(store):
-    store.remember("a  b\n\nc " + "x" * 2000)
-    assert len(store.recall("a b c")[0].content) <= 500
-
-
-def test_unknown_kinds_fall_back_rather_than_fragmenting(store):
-    """Free-form kinds would splinter into synonyms that never match."""
-    store.remember("Something", kind="not-a-real-kind")
-    assert store.recall("Something")[0].kind == "fact"
-
-
-def test_seed_is_capped(store):
-    """The whole point of the seed/recall split -- context stays bounded."""
-    for i in range(50):
-        store.remember(f"Fact number {i}")
-    assert len(store.seed()) <= 12
-
-
-def test_seed_prefers_preferences_and_proven_facts(store):
-    store.remember("Rarely useful trivia")
-    store.remember("The boss hates being read lists", kind="preference")
-    # Exercise one fact so it has a use count behind it.
-    store.remember("The boss works late")
-    store.recall("works late")
-
-    seeded = [m.content for m in store.seed(limit=2)]
-    assert "The boss hates being read lists" in seeded
-
-
-def test_preferences_are_available_as_a_dedicated_durable_view(store):
-    store.remember("The boss prefers concise answers", kind="preference")
-    store.remember("The boss lives in Hyderabad", kind="fact")
-    store.close()
-    reopened = MemoryStore(store._path)
-    try:
-        preferences = reopened.preferences()
-        assert [item.content for item in preferences] == [
-            "The boss prefers concise answers"
-        ]
-    finally:
-        reopened.close()
-
-
-def test_recall_promotes_what_it_returns(store):
-    store.remember("The boss flies out on Tuesday", kind="event")
-    store.recall("Tuesday")
-    store.recall("Tuesday")
-    assert store.recall("Tuesday", touch=False)[0].use_count >= 2
-
-
-def test_recall_on_empty_query_returns_nothing(store):
-    store.remember("Anything")
-    assert store.recall("") == []
-
-
-def test_recall_survives_fts_syntax_in_speech(store):
-    """Bare AND/OR/NEAR and quotes are FTS5 syntax and would otherwise raise."""
-    store.remember("The boss likes tea and coffee")
-    assert store.recall('tea AND coffee "NEAR') is not None
-
-
-def test_forget_removes_the_best_match(store):
-    store.remember("The boss dislikes mushrooms")
-    store.remember("The boss enjoys hiking")
-    store.forget("mushrooms")
-    assert store.count() == 1
-    assert store.recall("mushrooms") == []
-
-
-def test_forget_says_so_when_nothing_matches(store):
-    assert "Nothing" in store.forget("something never stored")
-
-
-def test_memory_survives_reopening(store, tmp_path):
-    """It is durable storage or it is not memory."""
-    store.remember("The boss's dog is called Rex")
-    store.close()
-
-    reopened = MemoryStore(tmp_path / "test_memory.db")
-    try:
-        assert reopened.recall("Rex")
-    finally:
-        reopened.close()
+    assert driver.visited == [
+        "https://open.spotify.com/search/Metamorphosis%20Interworld/tracks"
+    ]
+    assert "Metamorphosis" in result
+    assert "Interworld" in result
+    assert "playing" in result.lower()

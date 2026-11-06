@@ -7,6 +7,22 @@
 # in a scenario to absolute values so it keeps passing months from now.
 name: IRA
 scenarios:
+  - label: Adds a task by voice
+    instructions: |
+      PERSONA: A user organizing a to-do list.
+      OPENING LINE: "Add a task to revise chapter three, due January first, twenty thirty, at nine AM India time."
+      DO, IN ORDER:
+      1. After confirmation, ask: "What tasks do I have?"
+      2. Ask it to mark the chapter three task complete.
+      3. Thank the assistant and end the conversation.
+    agent_expectations: >
+      Calls add_task with the chapter three title and a timezone-aware ISO-8601
+      due date equivalent to 2030-01-01T03:30:00Z. Confirms tersely as IRA.
+      Uses list_tasks to report the saved task and complete_task with its ID
+      when asked. Never claims to schedule an alarm or automatic notification.
+    tags:
+      feature: tasks
+
   - label: Greets the boss in character
     instructions: |
       PERSONA: A first-time user who just connected and is curious what this assistant does.

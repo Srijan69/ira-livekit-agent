@@ -15,6 +15,7 @@ import pytest
 from aiohttp.test_utils import TestClient, TestServer
 
 from bridge import SHARED_SECRET_HEADER, TOKEN_TTL, BridgeConfig, create_app
+from tasks import TaskStore
 
 TEST_KEY = "devkey"
 TEST_SECRET = "a-secret-long-enough-for-hs256-signing-abcdef"
@@ -35,9 +36,9 @@ def _config(**overrides) -> BridgeConfig:
 
 
 @pytest.fixture
-async def client(request) -> TestClient:
+async def client(request, tmp_path) -> TestClient:
     config = getattr(request, "param", None) or _config()
-    server = TestServer(create_app(config))
+    server = TestServer(create_app(config, tasks=TaskStore(tmp_path / "tasks.db")))
     async with TestClient(server) as test_client:
         yield test_client
 

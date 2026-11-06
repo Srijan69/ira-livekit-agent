@@ -98,13 +98,10 @@ the most FRIDAY behavior on the list.
 
 **How.** Two independent halves, and the second is the useful one:
 
-- **Model-side:** Gemini's native-audio models support a proactivity setting,
-  where the model decides whether a given utterance deserves a response at all
-  (so she can ignore you talking to someone else). **Now confirmed reachable** —
-  the plugin's `_RealtimeOptions` carries `proactivity` and
-  `enable_affective_dialog` as constructor kwargs on `RealtimeModel`, right
-  alongside the `realtime_input_config` the latency work already sets, so wiring
-  them is the same one-line shape.
+- **Model-side:** support varies by model. The current `gemini-3.8-live`
+  primary always enables proactive audio and no longer supports affective
+  dialog; IRA omits those configuration flags. The older 2.5 fallback supports
+  optional settings. Check the current model documentation before changing them.
 - **Agent-side:** a background task watching whatever you care about — a build,
   a file, the clock, your battery — that calls
   `session.generate_reply(instructions=...)` when a condition fires. That's the
@@ -112,12 +109,10 @@ the most FRIDAY behavior on the list.
 
 The agent-side half needs no new API and does most of the work.
 
-**Deliberately not enabled yet.** Both model-side flags change how she decides
-to speak, and the greeting plus three of the live evals depend on her speaking
-predictably. Turning them on wants its own test pass rather than a ride-along on
-unrelated work — `proactivity` in particular could suppress the opening greeting
-outright, which is exactly the kind of change that should fail a test rather than
-surprise you on a call.
+**Agent-side watchers are not implemented yet.** Model-side selective responses
+do not schedule reminders or monitor a build. The C task list only saves to-dos;
+it does not make IRA speak at their due times. New watchers need behavior tests,
+including interruption and greeting behavior.
 
 **The trap.** An assistant that interrupts badly is worse than one that never
 interrupts. Rate-limit it, give it quiet hours, and make the bar for speaking
@@ -166,10 +161,12 @@ them out (#9) rather than growing the list.
 
 **Effort:** low each.
 
-### 6. System awareness
+### 6. System awareness — core readings built
 
 Battery, CPU, disk, network, which window has focus, what's playing, the time.
-`psutil` covers most of it in an afternoon.
+The `system_status` tool now reads CPU, memory, disk and battery with `psutil`,
+and `current_time` supplies local time and timezone. The Home rings use Electron
+metrics independently. Network, focused-window and media awareness remain open.
 
 Small on its own, but it's what makes her feel situated rather than
 teleconferenced in — and combined with #3 it's where "battery's at eight
@@ -229,8 +226,10 @@ at twenty. The boundary to watch for is a *task* — something with a beginning 
 an end, like filling out a form or booking a flight — because that has the phase
 boundary a handoff wants. Route on that when it appears, not on tool count.
 
-One thing already confirmed: handoffs that swap instructions do not work on
-`gemini-3.1-flash-live-preview`. They work on the current native-audio model.
+Current LiveKit Google plugins (1.8.2+) support instruction/context updates,
+greetings and handoffs on `gemini-3.1-flash-live-preview`; the earlier limitation
+was SDK-version dependent. IRA now uses Gemini 3.8 Live with a 2.5 native-audio
+fallback. See the README for current model choices and compatibility tests.
 
 **Effort:** medium.
 
@@ -242,11 +241,12 @@ free once #3 exists.
 
 **Effort:** medium, mostly reuse.
 
-### 11. A visible presence
+### 11. A visible presence — Home dashboard built
 
-The LiveKit React starter (`agent-starter-react`) gives a HUD — live transcript,
-speaking state, waveform. Turns her from a process into something on screen.
-The template exists; this is wiring, not building.
+The Electron Home dashboard now has voice and typed commands, the animated orb,
+system readings, SQLite tasks and configurable weather. See the desktop
+[handoff](docs/handoff/HANDOFF.md) for completed A–C work. Tray, hotkey, autostart,
+installer and the remaining sidebar pages are still future work.
 
 **Effort:** low.
 
@@ -289,10 +289,10 @@ Things that look like progress and aren't:
 - **Don't let a page into the prompt wholesale.** The browsing equivalent of the
   same mistake: page text is capped at 4000 characters and element listings at
   40, because anything she reads lands in context on every later turn.
-- **Don't switch to `gemini-3.1-flash-live-preview` for being newer.** It
-  ignores `generate_reply()`, which costs you the greeting, all proactivity,
-  background reporting, and the entire eval suite in one move. The README's
-  model table has the details.
+- **Verify model migrations against the current SDK and provider.** Native
+  audio, greeting, tool handling, context updates and safe failover all matter.
+  Run the offline compatibility suite, then opt-in live evals. Model names alone
+  do not establish support, and preview retirement dates need checking.
 - **Don't make her chatty.** The persona's restraint is the point. A proactive
   assistant with a low bar for speaking is a smart speaker.
 
@@ -349,7 +349,7 @@ that belongs in an environment variable.
 | # | Build | Why here |
 |---|---|---|
 | ~~1~~ | ~~Memory (#1)~~ | ✅ Built — biggest felt change, and nothing else depended on it |
-| 1 | System awareness (#6) | An afternoon's work, and it feeds proactivity |
+| ~~1~~ | ~~Core system awareness (#6)~~ | ✅ Built — CPU, memory, disk, battery and current time |
 | 2 | Proactivity, agent-side (#3) | Where she stops being a chatbot |
 | 3 | Desktop control, the easy verbs (#5) | Daily-use utility, low risk |
 | 4 | Split into multiple agents (#9) | Overdue — eleven tools on one prompt now |

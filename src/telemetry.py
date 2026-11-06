@@ -34,6 +34,9 @@ class SessionStatusReporter:
         label: str = "session",
         started_at: float | None = None,
         observer: Callable[[dict[str, Any]], None] | None = None,
+        call_id: str | None = None,
+        tool_name: str | None = None,
+        source: str | None = None,
     ) -> None:
         self.run_id = run_id or uuid.uuid4().hex[:8]
         self._sink = sink or print
@@ -41,8 +44,27 @@ class SessionStatusReporter:
         self._started_at = self._clock() if started_at is None else started_at
         self._label = label
         self._observer = observer
+        self._call_id = call_id
+        self._tool_name = tool_name
+        self._source = source
 
-    def emit(self, state: str, detail: str = "") -> None:
+    def emit(
+        self,
+        state: str,
+        detail: str = "",
+        *,
+        call_id: str | None = None,
+        tool_name: str | None = None,
+        source: str | None = None,
+        skill_run_id: str | None = None,
+        skill_slug: str | None = None,
+        skill_version: int | None = None,
+        step_index: int | None = None,
+        step_count: int | None = None,
+        step_tool: str | None = None,
+        step_outcome: str | None = None,
+        outcome: str | None = None,
+    ) -> None:
         # Upper-cased once, here, because the orb matches on these names and a
         # lower-case "running" from one call site would silently miss.
         state = state.upper()
@@ -68,17 +90,57 @@ class SessionStatusReporter:
         # more ways to fail than `print`. A failure there must not cost the
         # terminal line, nor the other way round.
         try:
-            self._observer(
-                {
-                    "run_id": self.run_id,
-                    "label": self._label,
-                    "state": state,
-                    "detail": detail,
-                    "at": time.time() * 1000,
-                }
-            )
+            event = {
+                "run_id": self.run_id,
+                "label": self._label,
+                "state": state,
+                "detail": detail,
+                "at": time.time() * 1000,
+            }
+            for key, value in (
+                ("call_id", call_id or self._call_id),
+                ("tool_name", tool_name or self._tool_name),
+                ("source", source or self._source),
+                ("skill_run_id", skill_run_id),
+                ("skill_slug", skill_slug),
+                ("skill_version", skill_version),
+                ("step_index", step_index),
+                ("step_count", step_count),
+                ("step_tool", step_tool),
+                ("step_outcome", step_outcome),
+                ("outcome", outcome),
+            ):
+                if value is not None and value != "":
+                    event[key] = value
+            self._observer(event)
         except Exception:
             return
+
+    def for_tool(self, context: Any) -> SessionStatusReporter:
+        """Bind internal progress to one call without mutating the shared reporter.
+
+        ``RunContext.function_call`` is public LiveKit metadata. Standalone tool
+        tests pass None and retain their existing terminal-only behavior.
+        """
+        try:
+            call = getattr(context, "function_call", None)
+            call_id = getattr(call, "call_id", None)
+            name = getattr(call, "name", None)
+        except Exception:
+            return self
+        if not isinstance(call_id, str) or not call_id:
+            return self
+        return SessionStatusReporter(
+            run_id=self.run_id,
+            sink=self._sink,
+            clock=self._clock,
+            label=self._label,
+            started_at=self._started_at,
+            observer=self._observer,
+            call_id=call_id,
+            tool_name=name if isinstance(name, str) else None,
+            source="tool",
+        )
 
     def child_run(self, label: str) -> SessionStatusReporter:
         return SessionStatusReporter(
@@ -88,4 +150,7 @@ class SessionStatusReporter:
             label=label,
             started_at=self._started_at,
             observer=self._observer,
+            call_id=self._call_id,
+            tool_name=self._tool_name,
+            source=self._source,
         )

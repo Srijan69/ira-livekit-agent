@@ -6,6 +6,10 @@ import type {
   ProcessStatus,
   SystemStats,
   TokenResult,
+  TasksApi,
+  SkillsApi,
+  ConnectionApi,
+  PersonalMemoryApi,
 } from "@shared/types";
 
 /**
@@ -22,6 +26,11 @@ import type {
 declare global {
   interface Window {
     ira?: {
+      connection?: ConnectionApi;
+      personalMemory?: PersonalMemoryApi;
+      restart(): Promise<void>;
+      tasks: TasksApi;
+      skills?: SkillsApi;
       onStats(listener: (stats: SystemStats) => void): () => void;
       getStats(): Promise<SystemStats | null>;
       window: {

@@ -2,7 +2,7 @@
 
 Turning the reference dashboard image into a real desktop app, connected to an existing LiveKit backend.
 
-A screenshot can't be converted directly into an app. The approach is to rebuild it as a web UI (HTML/CSS/JS) and wrap it in a desktop shell.
+A screenshot can't be converted directly into an app. The approach is to rebuild it as a web UI (HTML/CSS/JS) and wrap it in a desktop shell.Do the reverse enginerring and research and understand the componets in the ref image and decide and implement in the main app and check wheather both the ref image and app is looks similar.
 
 ---
 

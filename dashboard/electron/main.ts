@@ -1,14 +1,25 @@
 import { randomBytes } from "node:crypto";
 import { dirname, join } from "node:path";
 
-import { BrowserWindow, app, ipcMain, session, shell } from "electron";
+import { BrowserWindow, app, ipcMain, safeStorage, session, shell } from "electron";
+
+import type { ConnectionSaveResult } from "../shared/types";
+import { createConnectionStore, type ConnectionStore } from "./connection";
 
 import { findFreePort } from "./ports";
+import { createRestartController, prepareDevelopmentRelaunch } from "./restart";
 import { ManagedProcess, type ProcessStatus } from "./supervisor";
 import { SystemStatsPoller, type SystemStats } from "./system";
+import { createTaskProxy } from "./tasks";
+import { createSkillProxy } from "./skills";
+import { createPersonalMemoryProxy } from "./personalMemory";
 
 // IPC channel names live here so main and preload can't drift apart.
 const CHANNEL = {
+  appRestart: "ira:app:restart",
+  connectionGet: "ira:connection:get",
+  connectionSave: "ira:connection:save",
+  connectionChanged: "ira:connection:changed",
   statsPush: "ira:stats",
   statsSnapshot: "ira:stats:snapshot",
   windowMinimize: "ira:window:minimize",
@@ -20,6 +31,10 @@ const CHANNEL = {
   agentStatusPush: "ira:agent:status-push",
   agentRestart: "ira:agent:restart",
   agentLogs: "ira:agent:logs",
+  tasksList: "ira:tasks:list",
+  tasksCreate: "ira:tasks:create",
+  tasksUpdate: "ira:tasks:update",
+  tasksDelete: "ira:tasks:delete",
 } as const;
 
 let mainWindow: BrowserWindow | null = null;
@@ -27,6 +42,9 @@ let poller: SystemStatsPoller | null = null;
 let bridge: ManagedProcess | null = null;
 let agent: ManagedProcess | null = null;
 let bridgePort = 0;
+let connectionStore: ConnectionStore;
+let configurationRequired = true;
+let savingConnection: Promise<unknown> = Promise.resolve();
 
 /**
  * Per-launch secret for the bridge.
@@ -57,6 +75,8 @@ function createWindow(): BrowserWindow {
     minHeight: 800,
     show: false,
     frame: false,
+    title: "IRA",
+    icon: join(app.getAppPath(), "assets/ira.ico"),
     // Opaque rather than transparent: the design is a solid dark app, and a
     // transparent frameless window on Windows loses its drop shadow and picks
     // up a set of compositor bugs for no visual gain here. Windows 11 rounds
@@ -124,27 +144,27 @@ function send(channel: string, payload: unknown): void {
 }
 
 /**
- * Run IRA in a terminal instead, for her logs: `IRA_EXTERNAL_AGENT=1`.
- *
- * The bridge is still supervised -- the dashboard needs it for tokens -- but
- * the agent is left to whoever started it, and the renderer connects without
- * waiting for a registration it has no way to observe.
+ * Legacy external-worker mode cannot receive this desktop profile's keys.
+ * Keep it offline and direct credential setup to a normal supervised launch.
  */
 const externalAgent = process.env["IRA_EXTERNAL_AGENT"] === "1";
 
 async function startPythonProcesses(): Promise<void> {
-  bridgePort = await findFreePort();
+  if (!bridgePort) bridgePort = await findFreePort();
   const cwd = repoRoot();
+  const credentials = await connectionStore.childEnv();
+  configurationRequired = ["GOOGLE_API_KEY", "LIVEKIT_URL", "LIVEKIT_API_KEY", "LIVEKIT_API_SECRET"]
+    .some((field) => !credentials[field]);
 
   const onStatus = (status: ProcessStatus) => send(CHANNEL.agentStatusPush, status);
 
   bridge = new ManagedProcess(
     "bridge",
     "uv",
-    ["run", "python", "src/bridge.py", "--port", String(bridgePort)],
+    ["run", "--no-env-file", "python", "src/bridge.py", "--port", String(bridgePort)],
     {
       cwd,
-      env: { IRA_BRIDGE_SECRET: bridgeSecret },
+      env: { ...credentials, IRA_BRIDGE_SECRET: bridgeSecret },
       // Our own log line, printed once the socket is actually listening.
       readyPattern: /bridge listening/,
       onStatus,
@@ -155,8 +175,9 @@ async function startPythonProcesses(): Promise<void> {
     // `dev` rather than `console`: console runs the job in-process and
     // expects a terminal to talk to. `dev` registers a worker that joins the
     // rooms the dashboard creates.
-    agent = new ManagedProcess("agent", "uv", ["run", "python", "src/agent.py", "dev"], {
+    agent = new ManagedProcess("agent", "uv", ["run", "--no-env-file", "python", "src/agent.py", "dev"], {
       cwd,
+      env: credentials,
       // The SDK's own line once the worker can take a dispatch. Joining a
       // room before this is how IRA ends up never arriving: the room's
       // dispatch is created at join, with no worker yet to take it.
@@ -166,7 +187,13 @@ async function startPythonProcesses(): Promise<void> {
   }
 
   bridge.start();
-  agent?.start();
+  if (!configurationRequired) agent?.start();
+}
+
+async function restartPythonProcesses(): Promise<void> {
+  agent?.stop();
+  bridge?.stop();
+  await startPythonProcesses();
 }
 
 /**
@@ -204,6 +231,76 @@ async function callBridge(path: string, init?: RequestInit): Promise<Response> {
 }
 
 function registerIpc(): void {
+  const requireMainWindow = (event: Electron.IpcMainInvokeEvent) => {
+    if (event.sender !== mainWindow?.webContents) throw new Error("Unknown window");
+  };
+  ipcMain.handle(CHANNEL.connectionGet, (event) => {
+    requireMainWindow(event);
+    return connectionStore.get();
+  });
+  ipcMain.handle(CHANNEL.connectionSave, (event, input: unknown) => {
+    requireMainWindow(event);
+    const save = async (): Promise<ConnectionSaveResult> => {
+      // An independently launched worker cannot receive this profile's keys.
+      if (externalAgent) {
+        return { error: "Close IRA and launch it without IRA_EXTERNAL_AGENT to connect using your saved keys." };
+      }
+      const result = await connectionStore.save(input);
+      if ("error" in result) return result;
+      try {
+        await restartPythonProcesses();
+        send(CHANNEL.connectionChanged, undefined);
+      } catch {
+        return { error: "Keys were saved, but IRA could not restart. Close and reopen IRA to reconnect." };
+      }
+      return result;
+    };
+    // Keep persistence and the corresponding process restart in one order.
+    const result = savingConnection.then(save, save);
+    savingConnection = result.catch(() => {});
+    return result;
+  });
+  const restartApp = createRestartController({
+    flushStorage: () => session.defaultSession.flushStorageData(),
+    prepareRelaunch: async () => {
+      const devUrl = process.env["ELECTRON_RENDERER_URL"];
+      if (devUrl && !app.isPackaged) {
+        await prepareDevelopmentRelaunch(app.getAppPath(), devUrl);
+      } else {
+        app.relaunch();
+      }
+    },
+    // Let the IPC acknowledgement reach the renderer before tearing it down.
+    quit: () => { setTimeout(() => app.quit(), 50); },
+  });
+  ipcMain.handle(CHANNEL.appRestart, (event) => {
+    if (event.sender !== mainWindow?.webContents) throw new Error("Unknown window");
+    return restartApp();
+  });
+
+  const tasks = createTaskProxy(callBridge);
+  ipcMain.handle(CHANNEL.tasksList, (_event, limit) => tasks.list(limit));
+  ipcMain.handle(CHANNEL.tasksCreate, (_event, input) => tasks.create(input));
+  ipcMain.handle(CHANNEL.tasksUpdate, (_event, id, patch) => tasks.update(id, patch));
+  ipcMain.handle(CHANNEL.tasksDelete, (_event, id) => tasks.delete(id));
+
+  const personalMemory = createPersonalMemoryProxy(callBridge, () => send("ira:personal-memory:changed", undefined));
+  for (const operation of ["profile", "saveProfile", "resetProfile", "settings", "saveSettings", "list", "status", "deleteMemory", "clearMemory"] as const) {
+    ipcMain.handle(`ira:personal-memory:${operation}`, (event, ...args: unknown[]) => {
+      requireMainWindow(event);
+      return (personalMemory[operation] as (...input: unknown[]) => unknown)(...args);
+    });
+  }
+
+  const skills = createSkillProxy(callBridge);
+  ipcMain.handle("ira:skills:list", (_event, archived) => skills.list(archived));
+  ipcMain.handle("ira:skills:detail", (_event, slug, version) => skills.detail(slug, version));
+  ipcMain.handle("ira:skills:history", (_event, limit) => skills.history(limit));
+  ipcMain.handle("ira:skills:suggestions", () => skills.suggestions());
+  ipcMain.handle("ira:skills:pin", (_event, slug, pinned) => skills.pin(slug, pinned));
+  ipcMain.handle("ira:skills:archive", (_event, slug) => skills.archive(slug));
+  ipcMain.handle("ira:skills:restore", (_event, slug) => skills.restore(slug));
+
   ipcMain.handle(CHANNEL.statsSnapshot, () => poller?.snapshot() ?? null);
 
   ipcMain.handle(CHANNEL.windowMinimize, () => {
@@ -222,6 +319,9 @@ function registerIpc(): void {
   });
 
   ipcMain.handle(CHANNEL.sessionToken, async (_event, room?: string) => {
+    if (configurationRequired || externalAgent) {
+      return { error: "Open Settings > Connection and Keys to connect IRA with your own credentials." };
+    }
     try {
       const response = await callBridge("/token", {
         method: "POST",
@@ -252,6 +352,7 @@ function registerIpc(): void {
 
   ipcMain.handle(CHANNEL.agentStatus, () => ({
     supervised: !externalAgent,
+    configurationRequired: configurationRequired || externalAgent,
     agent: agent?.status() ?? null,
     bridge: bridge?.status() ?? null,
   }));
@@ -261,9 +362,15 @@ function registerIpc(): void {
     bridge: bridge?.recentLogs() ?? [],
   }));
 
-  ipcMain.handle(CHANNEL.agentRestart, () => {
-    agent?.restart();
-    bridge?.restart();
+  ipcMain.handle(CHANNEL.agentRestart, (event) => {
+    requireMainWindow(event);
+    const restart = async () => {
+      await restartPythonProcesses();
+      send(CHANNEL.connectionChanged, undefined);
+    };
+    const result = savingConnection.then(restart, restart);
+    savingConnection = result.catch(() => {});
+    return result;
   });
 }
 
@@ -280,6 +387,10 @@ if (!gotLock) {
   });
 
   void app.whenReady().then(async () => {
+    connectionStore = createConnectionStore({
+      path: join(app.getPath("userData"), "connection.json"),
+      encryption: safeStorage,
+    });
     restrictPermissions();
     registerIpc();
     // Before the window: the renderer's first status query must find both
@@ -313,7 +424,8 @@ if (!gotLock) {
 
   // Both children are killed on the way out. An orphaned agent would hold the
   // microphone and keep answering with no window to show for it.
-  app.on("before-quit", () => {
+  app.once("before-quit", () => {
+    poller?.stop();
     bridge?.stop();
     agent?.stop();
   });

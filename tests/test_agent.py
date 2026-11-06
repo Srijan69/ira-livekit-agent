@@ -23,7 +23,8 @@ from unittest.mock import MagicMock, call, patch
 
 import pytest
 from google.genai import types as genai_types
-from livekit.agents import NOT_GIVEN, AgentSession, APIConnectionError
+from livekit.agents import NOT_GIVEN, AgentSession, APIConnectionError, ToolError
+from livekit.agents.llm import ToolContext
 from livekit.agents.voice.run_result import mock_tools
 from livekit.plugins import google
 
@@ -44,14 +45,19 @@ from agent import (
     server,
 )
 from browser import BrowserUnavailableError, PageElement
-from memory import MemoryStore
+from dual_memory import DualMemoryStore
+from realtime_model import GEMINI_FALLBACK_MODEL, GeminiRealtimeFallback
+from skill_format import Action, Check, Skill, Step
+from skill_store import SkillStore
+from skills import SkillCatalog
 from telemetry import SessionStatusReporter
-from workflows import WorkflowStore
 
 # Model ids confirmed to advertise `bidiGenerateContent` on this project's
 # GOOGLE_API_KEY. Anything outside this set cannot serve a realtime session --
 # notably the plugin's own default, `gemini-2.5-flash`, which cannot.
 LIVE_CAPABLE_MODELS = {
+    "gemini-3.8-live",
+    "gemini-3.8-live-extended-thinking",
     "gemini-3.1-flash-live-preview",
     "gemini-2.5-flash-native-audio-latest",
     "gemini-2.5-flash-native-audio-preview-12-2025",
@@ -61,6 +67,9 @@ LIVE_CAPABLE_MODELS = {
 # with a greeting and be driven by the in-process eval framework (which routes
 # every turn through generate_reply under the hood).
 GREETING_CAPABLE_MODELS = {
+    "gemini-3.8-live",
+    "gemini-3.8-live-extended-thinking",
+    "gemini-3.1-flash-live-preview",
     "gemini-2.5-flash-native-audio-latest",
     "gemini-2.5-flash-native-audio-preview-12-2025",
 }
@@ -69,8 +78,8 @@ GREETING_CAPABLE_MODELS = {
 # agent.py calls load_dotenv('.env.local') at import, so running
 # `uv run pytest` from the project root is enough to pick the key up.
 requires_live_api = pytest.mark.skipif(
-    not os.environ.get("GOOGLE_API_KEY"),
-    reason="opens a live Gemini Live session; needs GOOGLE_API_KEY",
+    os.environ.get("IRA_RUN_LIVE_EVALS") != "1" or not os.environ.get("GOOGLE_API_KEY"),
+    reason="live provider evals are opt-in: set IRA_RUN_LIVE_EVALS=1 and GOOGLE_API_KEY",
 )
 
 # Model that grades the judged evals. Overridable because the free tier meters
@@ -128,7 +137,15 @@ async def _judged(assertion) -> None:
 
 
 def test_llm_is_a_gemini_realtime_model() -> None:
-    assert isinstance(Assistant().llm, google.realtime.RealtimeModel)
+    model = Assistant().llm
+    assert isinstance(model, GeminiRealtimeFallback)
+    assert [child.model for child in model.models] == [
+        GEMINI_LIVE_MODEL,
+        GEMINI_FALLBACK_MODEL,
+    ]
+    assert all(
+        isinstance(child, google.realtime.RealtimeModel) for child in model.models
+    )
 
 
 def test_no_separate_stt_or_tts_stage() -> None:
@@ -146,17 +163,15 @@ def test_configured_model_supports_realtime() -> None:
 
 
 def test_configured_model_can_speak_first() -> None:
-    """src/agent.py calls generate_reply() so IRA opens the conversation.
-
-    Only the native-audio models accept that call; gemini-3.1-flash-live-preview
-    rejects it, logs an error, and produces no speech. Pointing
-    GEMINI_LIVE_MODEL back at 3.1 must therefore fail here rather than ship an
-    agent that silently never greets.
-    """
+    """Both configured providers support explicit replies on the current SDK."""
     assert GEMINI_LIVE_MODEL in GREETING_CAPABLE_MODELS, (
         f"{GEMINI_LIVE_MODEL!r} rejects generate_reply(), so the greeting in "
         f"src/agent.py would produce no speech. Use one of: "
         f"{sorted(GREETING_CAPABLE_MODELS)}"
+    )
+    assert GEMINI_FALLBACK_MODEL in GREETING_CAPABLE_MODELS
+    assert all(
+        child.capabilities.mutable_chat_context for child in Assistant().llm.models
     )
 
 
@@ -170,9 +185,8 @@ def test_model_and_voice_reach_the_plugin() -> None:
 
     Reads a private `_opts` because the plugin exposes no public accessor.
     """
-    opts = Assistant().llm._opts
-    assert opts.model == GEMINI_LIVE_MODEL
-    assert opts.voice == GEMINI_VOICE
+    for child in Assistant().llm.models:
+        assert child._opts.voice == GEMINI_VOICE
 
 
 # --------------------------------------------------------------------------
@@ -241,7 +255,11 @@ def test_persona_teaches_workflow_reuse_and_durable_notes() -> None:
 
 
 def test_turn_taking_target_keeps_dead_air_under_half_a_second() -> None:
-    vad = Assistant().llm._opts.realtime_input_config.automatic_activity_detection
+    vad = (
+        Assistant()
+        .llm.models[0]
+        ._opts.realtime_input_config.automatic_activity_detection
+    )
     assert vad.silence_duration_ms <= 500
 
 
@@ -266,10 +284,17 @@ def test_open_app_is_registered_as_a_tool() -> None:
     assert "open_app" in names
 
 
-def test_open_app_description_mentions_opening_an_app() -> None:
+@pytest.mark.parametrize("use_parameters_json_schema", [False, True])
+def test_open_app_description_mentions_opening_an_app(
+    use_parameters_json_schema: bool,
+) -> None:
     """The description is what the model matches "open Spotify" against."""
     tool = next(t for t in Assistant().tools if t.info.name == "open_app")
-    description = (tool.info.description or "").lower()
+    schemas = ToolContext([tool]).parse_function_tools(
+        "google", use_parameters_json_schema=use_parameters_json_schema
+    )
+    schema = next(schema for schema in schemas if schema["name"] == "open_app")
+    description = (schema["description"] or "").lower()
     assert "open" in description
     assert "app" in description
 
@@ -361,38 +386,39 @@ async def test_open_app_reports_what_it_did(fake_pyautogui) -> None:
 
 async def test_open_app_declines_an_empty_name(fake_pyautogui) -> None:
     """Nothing should be typed at the Start menu when there is no name."""
-    with patch("agent.time.sleep"):
-        result = await Assistant().open_app(None, app_name="   ")
+    with patch("agent.time.sleep"), pytest.raises(ToolError, match="app name"):
+        await Assistant().open_app(None, app_name="   ")
 
     assert fake_pyautogui.mock_calls == []
-    assert "name" in result.lower()
 
 
 async def test_open_app_surfaces_a_missing_pyautogui() -> None:
     """The import fails on a headless host, and must not kill the session.
 
     src/agent.py deploys to LiveKit Cloud, where there is no desktop at all.
-    The tool has to come back with something IRA can say instead of raising
-    into the session.
+    A ToolError marks the call failed and gives IRA a message she can say.
 
     A None entry in sys.modules is how Python signals a blocked import: the
     `import pyautogui` inside the tool raises ImportError against it.
     """
-    with patch.dict(sys.modules, {"pyautogui": None}):
-        result = await Assistant().open_app(None, app_name="Spotify")
-
-    assert "spotify" in result.lower()
+    with (
+        patch.dict(sys.modules, {"pyautogui": None}),
+        pytest.raises(
+            ToolError, match="Cannot open Spotify: desktop control is unavailable"
+        ),
+    ):
+        await Assistant().open_app(None, app_name="Spotify")
 
 
 async def test_open_app_survives_a_desktopless_host(fake_pyautogui) -> None:
     """PyAutoGUI raises at call time too, e.g. no DISPLAY on Linux."""
     fake_pyautogui.press.side_effect = RuntimeError("no display")
 
-    with patch("agent.time.sleep"):
-        result = await Assistant().open_app(None, app_name="Spotify")
-
-    assert isinstance(result, str)
-    assert result, "must return something IRA can say"
+    with (
+        patch("agent.time.sleep"),
+        pytest.raises(ToolError, match="Could not open Spotify"),
+    ):
+        await Assistant().open_app(None, app_name="Spotify")
 
 
 # --------------------------------------------------------------------------
@@ -412,7 +438,7 @@ def test_turn_taking_is_tuned_rather_than_left_to_the_default() -> None:
     plugin sends no realtime_input_config unless one is given, so leaving this
     NOT_GIVEN is what the slow behaviour looked like.
     """
-    config = Assistant().llm._opts.realtime_input_config
+    config = Assistant().llm.models[0]._opts.realtime_input_config
     assert config is not NOT_GIVEN and config is not None, (
         "no realtime_input_config means Gemini's default end-of-turn wait, "
         "which is the dead air that made IRA feel a minute behind"
@@ -438,7 +464,7 @@ def test_context_is_compressed_so_later_turns_do_not_slow_down() -> None:
     degrades steadily -- the twentieth reply is slower than the first for a
     reason that has nothing to do with what was asked.
     """
-    compression = Assistant().llm._opts.context_window_compression
+    compression = Assistant().llm.models[0]._opts.context_window_compression
     assert compression is not NOT_GIVEN and compression is not None
     assert compression.sliding_window is not None
 
@@ -491,9 +517,8 @@ def test_console_key_listener_interrupt_is_the_only_suppressed_shutdown_error() 
 # Browser and memory tools
 #
 # Every one of these wraps a blocking library in asyncio.to_thread and catches
-# its own exceptions. Both matter for the same reason: a tool that raises into
-# a realtime session drops the turn, and IRA goes silent with no way to explain
-# herself. The fakes here never start Chrome -- see tests/test_browser_and_memory.py.
+# operational failures as ToolError so the SDK cannot mark failed work done.
+# The fakes never start Chrome -- see tests/test_browser_and_memory.py.
 # --------------------------------------------------------------------------
 
 
@@ -542,20 +567,21 @@ BROWSER_TOOLS = {
     "type_into_element",
     "go_back",
     "close_browser",
-    "spotify_control",
-    "spotify_play_playlist",
-    "open_spotify",
 }
 MEMORY_TOOLS = {"remember", "recall", "forget"}
 
 
-def test_browser_tools_are_registered() -> None:
-    names = {tool.info.name for tool in Assistant().tools}
+async def test_browser_tools_are_registered_after_loading_capability() -> None:
+    assistant = Assistant()
+    await assistant.load_capabilities(None, "browser")
+    names = {tool.info.name for tool in assistant.tools}
     assert names >= BROWSER_TOOLS, f"missing: {sorted(BROWSER_TOOLS - names)}"
 
 
-def test_memory_tools_are_registered() -> None:
-    names = {tool.info.name for tool in Assistant().tools}
+async def test_memory_tools_are_registered_after_loading_capability() -> None:
+    assistant = Assistant()
+    await assistant.load_capabilities(None, "memory")
+    names = {tool.info.name for tool in assistant.tools}
     assert names >= MEMORY_TOOLS, f"missing: {sorted(MEMORY_TOOLS - names)}"
 
 
@@ -567,170 +593,247 @@ async def test_browse_to_reports_the_page_it_landed_on() -> None:
     assert "Example Domain" in result
 
 
-async def test_spotify_control_is_available_as_a_voice_tool() -> None:
-    result = await Assistant(browser=FakeBrowser()).spotify_control(
-        None, action="pause"
+async def test_read_page_is_available_as_a_voice_tool() -> None:
+    result = await Assistant(browser=FakeBrowser()).read_page(None)
+    assert "Some page text" in result
+
+
+async def test_list_page_elements_is_available_as_a_voice_tool() -> None:
+    result = await Assistant(browser=FakeBrowser()).list_page_elements(None)
+    assert "1. link Sign in" in result
+    assert "2. textbox Search" in result
+
+
+async def test_click_element_is_available_as_a_voice_tool() -> None:
+    result = await Assistant(browser=FakeBrowser()).click_element(None, index=1)
+    assert "Clicked element 1" in result
+
+
+async def test_type_into_element_is_available_as_a_voice_tool() -> None:
+    result = await Assistant(browser=FakeBrowser()).type_into_element(
+        None, index=2, text="phonk music", submit=True
     )
-    assert "spotify pause" in result.lower()
+    assert "Typed phonk music into 2" in result
 
 
-async def test_spotify_playlist_tool_is_available_as_a_voice_tool() -> None:
-    class PlaylistBrowser(FakeBrowser):
-        def spotify_play_playlist(self, name: str) -> str:
-            return f"Playing Spotify playlist {name}."
-
-    result = await Assistant(browser=PlaylistBrowser()).spotify_play_playlist(
-        None, name="My Funk Songs"
+async def test_skill_tools_replace_legacy_execution_and_desktop_is_ready_at_startup() -> (
+    None
+):
+    assistant = Assistant()
+    names = {tool.info.name for tool in assistant.tools}
+    assert {"run_skill", "stop_skill", "skill_status", "list_skills"} <= names
+    assert (
+        not {
+            "save_workflow",
+            "list_workflows",
+            "predict_workflow",
+            "run_workflow",
+            "delete_workflow",
+            "adapt_task",
+        }
+        & names
     )
-    assert "my funk songs" in result.lower()
-
-
-def test_status_reporter_ignores_interim_transcript_spam() -> None:
-    callbacks = {}
-
-    class FakeSession:
-        def on(self, name, callback):
-            callbacks[name] = callback
-
-    lines: list[str] = []
-    from agent import _attach_status_reporter
-
-    _attach_status_reporter(FakeSession(), SessionStatusReporter(sink=lines.append))
-    callbacks["user_input_transcribed"](type("Event", (), {"is_final": False})())
-    callbacks["user_input_transcribed"](type("Event", (), {"is_final": True})())
-
-    assert len(lines) == 1
-    assert "final transcript" in lines[0]
-
-
-async def test_open_spotify_is_available_as_a_voice_tool() -> None:
-    result = await Assistant(browser=FakeBrowser()).open_spotify(None, browser="brave")
-    assert "brave" in result.lower()
-
-
-def test_workflow_tools_are_registered() -> None:
-    names = {tool.info.name for tool in Assistant().tools}
-    assert {
-        "save_workflow",
-        "list_workflows",
-        "predict_workflow",
-        "run_workflow",
-        "delete_workflow",
-        "adapt_task",
-        "open_workflows_folder",
-        "capture_screen",
+    desktop_tools = {
         "move_mouse",
         "click_mouse",
         "type_on_desktop",
-    } <= names
+    }
+    assert desktop_tools <= names
+    assert "capture_screen" in names
+    await assistant.load_capabilities(None, "desktop")
+    assert desktop_tools <= {tool.info.name for tool in assistant.tools}
 
 
-async def test_workflow_tools_persist_and_retrieve_markdown(tmp_path) -> None:
-    agent = Assistant(workflows=WorkflowStore(tmp_path))
-    await agent.save_workflow(
-        None,
-        name="Morning setup",
-        goal="Prepare the work session",
-        steps=["Open Spotify", "Start focus playlist"],
+async def test_capture_screen_without_image_delivery_is_not_actionable(
+    desktop_view,
+) -> None:
+    assistant = Assistant(desktop=desktop_view[0])
+    with pytest.raises(ToolError, match="screen image"):
+        await assistant.capture_screen(None)
+    assert assistant._computer._frame is None
+
+
+async def test_capture_screen_failure_raises_tool_error(desktop_view) -> None:
+    desktop, backend, context, _ = desktop_view
+    backend.screenshot = lambda: (_ for _ in ()).throw(
+        RuntimeError("display unavailable")
     )
-    result = await agent.run_workflow(None, name="morning setup")
-    assert "Prepare the work session" in result
-    assert "Start focus playlist" in result
+    with pytest.raises(ToolError, match="screen is not available"):
+        await Assistant(desktop=desktop).capture_screen(context)
 
 
-async def test_predict_workflow_explains_the_selected_plan(tmp_path) -> None:
-    store = WorkflowStore(tmp_path)
-    store.save(
-        "Play focus music",
-        "Start the saved focus playlist in Spotify",
-        ["open_spotify: browser=chrome", "spotify_control: action=play"],
-        allowed_tools=["open_spotify", "spotify_control"],
-        verification=["Playback is active"],
+def test_instructions_include_screen_capture_guidance() -> None:
+    instructions = Assistant().instructions
+    assert "capture the screen" in instructions
+    assert "capture_screen" in instructions
+    assert "encounters an error" in instructions
+    assert "call capture_screen" in instructions
+
+
+async def test_capture_screen_reports_actual_foreground_and_image_size(
+    desktop_view,
+) -> None:
+    from livekit.agents import llm
+
+    desktop, _, context, _ = desktop_view
+    assistant = Assistant(desktop=desktop)
+    result = json.loads(await assistant.capture_screen(context))
+    assert result["active_window"] == "Chrome profiles"
+    assert result["image_size"] == [800, 600]
+    assert result["coordinate_space"] == "image_pixels"
+    assert (
+        sum(
+            isinstance(c, llm.ImageContent)
+            for m in assistant.chat_ctx.messages()
+            for c in m.content
+        )
+        == 1
     )
 
-    result = await Assistant(workflows=store).predict_workflow(
-        None, request="start my focus playlist in Spotify"
+
+def test_dedicated_spotify_tools_removed_and_selenium_tools_registered() -> None:
+    assistant = Assistant()
+    tool_names = {tool.info.name for tool in assistant.tools}
+    # Dedicated Spotify tools must not be registered
+    assert "open_spotify" not in tool_names
+    assert "spotify_control" not in tool_names
+    assert "spotify_play_playlist" not in tool_names
+    assert "spotify_play_track" not in tool_names
+    # General Selenium browser tools must be registered
+    assert {
+        "browse_to",
+        "read_page",
+        "list_page_elements",
+        "click_element",
+        "type_into_element",
+        "go_back",
+        "close_browser",
+    } <= tool_names
+
+
+async def test_hermes_skills_progressive_disclosure(tmp_path) -> None:
+    catalog = SkillCatalog(tmp_path / "skills")
+    catalog.create_skill(
+        "play-focus-music",
+        content="---\nname: play-focus-music\ndescription: Play focus music on Spotify.\ncategory: media\n---\n\n# Steps\n1. Open Spotify.",
+        category="media",
     )
+    agent = Assistant(skills_catalog=catalog)
+    listed = await agent.skills_list(None)
+    assert "play-focus-music" in listed
+    assert "media" in listed
 
-    assert "Play focus music" in result
-    assert "open_spotify" in result
-    assert "Playback is active" in result
-
-
-async def test_run_workflow_accepts_a_natural_language_request(tmp_path) -> None:
-    store = WorkflowStore(tmp_path)
-    store.save(
-        "Play focus music",
-        "Start the saved focus playlist in Spotify",
-        ["open_spotify: browser=chrome", "spotify_control: action=play"],
-        allowed_tools=["open_spotify", "spotify_control"],
-        verification=["Playback is active"],
-    )
-
-    result = await Assistant(browser=FakeBrowser(), workflows=store).run_workflow(
-        None, "start my focus playlist in Spotify"
-    )
-
-    assert "Play focus music" in result
-    assert "completed" in result.lower()
+    view = await agent.skill_view(None, name="play-focus-music")
+    assert "Play focus music on Spotify" in view
+    assert "Open Spotify" in view
 
 
-async def test_detailed_workflow_executes_only_declared_actions(tmp_path) -> None:
+async def test_verified_skill_resolves_phrase_and_executes_declared_actions(
+    tmp_path,
+) -> None:
     lines: list[str] = []
-    store = WorkflowStore(tmp_path)
+    store = SkillStore(tmp_path)
     store.save(
-        "Play focus",
-        "Play focus music",
-        ["open_spotify: browser=chrome", "spotify_control: action=play"],
-        allowed_tools=["open_spotify", "spotify_control"],
-        verification=["Playback is active"],
+        Skill(
+            name="Play focus",
+            description="Play focus music",
+            state="enabled",
+            phrases=("start my focus playlist in Spotify",),
+            allowed_tools=("open_spotify", "spotify_control"),
+            steps=(
+                Step(
+                    1,
+                    "Open Spotify",
+                    action=Action(
+                        "tool", tool="open_spotify", args=(("browser", "chrome"),)
+                    ),
+                    check=Check("page_contains", "Spotify"),
+                ),
+                Step(
+                    2,
+                    "Start playback",
+                    action=Action(
+                        "tool", tool="spotify_control", args=(("action", "play"),)
+                    ),
+                    check=Check("page_element", '[data-testid="control-button-pause"]'),
+                ),
+            ),
+        ),
+        source="compiled",
     )
+    calls = []
+
+    class ObservedBrowser(FakeBrowser):
+        def open_spotify(self, browser=None):
+            calls.append(("open", browser))
+            return "Spotify opened"
+
+        def spotify_control(self, action, seconds=10):
+            calls.append(("control", action))
+            return "Playback requested"
+
+        def observe(self, kind, value):
+            if (kind, value) == ("page_contains", "Spotify"):
+                return calls == [("open", "chrome")]
+            if (kind, value) == (
+                "page_element",
+                '[data-testid="control-button-pause"]',
+            ):
+                return calls[-1] == ("control", "play")
+            return False
 
     result = await Assistant(
-        browser=FakeBrowser(),
-        workflows=store,
+        browser=ObservedBrowser(),
+        skills=store,
         reporter=SessionStatusReporter(sink=lines.append),
-    ).run_workflow(None, "play focus")
+    ).run_skill(None, "start my focus playlist in Spotify")
 
     assert "completed" in result.lower()
+    assert "2/2 steps verified" in result
+    assert calls == [("open", "chrome"), ("control", "play")]
     assert any("DELEGATING" in line for line in lines)
+    assert len([line for line in lines if "VERIFYING" in line]) == 2
     assert any("DONE" in line for line in lines)
 
 
-async def test_executable_workflow_requires_allowlist_and_verification(
-    tmp_path,
-) -> None:
-    store = WorkflowStore(tmp_path)
-    store.save("Unsafe", "Unsafe", ["open_app: app_name=Notepad"])
-
-    result = await Assistant(workflows=store).run_workflow(None, "unsafe")
-
-    assert "allowed_tools" in result
-
-
-async def test_open_workflows_folder_uses_the_workflow_store(tmp_path) -> None:
-    opened = []
-    agent = Assistant(
-        workflows=WorkflowStore(tmp_path / "workflows", opener=opened.append)
+async def test_hermes_skill_manage_creates_and_patches(tmp_path) -> None:
+    catalog = SkillCatalog(tmp_path / "skills")
+    agent = Assistant(skills_catalog=catalog)
+    created = await agent.skill_manage(
+        None,
+        action="create",
+        name="daily-standup",
+        content="# Standup\nSpeak agenda.",
+        category="productivity",
     )
-    result = await agent.open_workflows_folder(None)
-    assert opened == [agent._workflows.root]
-    assert "opened" in result.lower()
+    assert "Created" in created
+    assert catalog.get_skill("daily-standup") is not None
+
+    patched = await agent.skill_manage(
+        None,
+        action="patch",
+        name="daily-standup",
+        old_string="Speak agenda.",
+        new_string="Speak concise agenda.",
+    )
+    assert "Patched" in patched
+    view = await agent.skill_view(None, name="daily-standup")
+    assert "concise agenda" in view
 
 
 async def test_save_note_is_durable_and_seeded(tmp_path) -> None:
-    store = MemoryStore(tmp_path / "memory.db")
-    agent = Assistant(memory=store)
+    store = DualMemoryStore(tmp_path / "memories")
+    agent = Assistant(dual_memory=store)
     await agent.save_note(None, note="The boss prefers concise answers")
-    reopened = MemoryStore(tmp_path / "memory.db")
+    reopened = DualMemoryStore(tmp_path / "memories")
     assert "concise answers" in (
-        await Assistant(memory=reopened).recall(None, query="concise")
+        await Assistant(dual_memory=reopened).recall(None, query="concise")
     )
 
 
 async def test_preference_tool_persists_and_lists_preferences(tmp_path) -> None:
-    store = MemoryStore(tmp_path / "memory.db")
-    agent = Assistant(memory=store)
+    store = DualMemoryStore(tmp_path / "memories")
+    agent = Assistant(dual_memory=store)
     result = await agent.remember_preference(
         None, preference="The boss prefers concise answers"
     )
@@ -739,27 +842,18 @@ async def test_preference_tool_persists_and_lists_preferences(tmp_path) -> None:
     assert "concise answers" in listed
 
 
-def test_preference_tools_are_registered() -> None:
-    names = {tool.info.name for tool in Assistant().tools}
+async def test_preference_tools_are_registered_after_loading_memory() -> None:
+    assistant = Assistant()
+    await assistant.load_capabilities(None, "memory")
+    names = {tool.info.name for tool in assistant.tools}
     assert {"remember_preference", "list_preferences"} <= names
 
 
 def test_preferences_are_in_startup_instructions(tmp_path) -> None:
-    store = MemoryStore(tmp_path / "memory.db")
-    store.remember("The boss prefers concise answers", kind="preference")
-    agent = Assistant(memory=store, preferences="The boss prefers concise answers")
+    store = DualMemoryStore(tmp_path / "memories")
+    store.add("user", "The boss prefers concise answers")
+    agent = Assistant(dual_memory=store)
     assert "concise answers" in agent.instructions
-
-
-async def test_adapt_task_saves_a_reusable_workflow(tmp_path) -> None:
-    agent = Assistant(workflows=WorkflowStore(tmp_path))
-    result = await agent.adapt_task(
-        None,
-        task="Prepare my focus session",
-        steps=["Open Spotify", "Start the focus playlist"],
-    )
-    assert "saved" in result.lower()
-    assert agent._workflows.get("prepare my focus session") is not None
 
 
 async def test_list_page_elements_speaks_them_numbered() -> None:
@@ -770,15 +864,14 @@ async def test_list_page_elements_speaks_them_numbered() -> None:
     assert "2. textbox Search" in result
 
 
-async def test_browser_failures_come_back_as_speech() -> None:
+async def test_browser_failures_use_tool_error_with_speakable_message() -> None:
     class Broken(FakeBrowser):
         def navigate(self, url: str) -> str:
             raise RuntimeError("net::ERR_NAME_NOT_RESOLVED")
 
-    result = await Assistant(browser=Broken()).browse_to(None, url="nope.invalid")
-
-    assert isinstance(result, str) and result
-    assert "err_name_not_resolved" not in result.lower(), (
+    with pytest.raises(ToolError, match="Could not open that page") as error:
+        await Assistant(browser=Broken()).browse_to(None, url="nope.invalid")
+    assert "err_name_not_resolved" not in str(error.value).lower(), (
         "raw Chrome error codes are not something IRA can say out loud"
     )
 
@@ -790,16 +883,14 @@ async def test_an_unavailable_browser_explains_itself() -> None:
         def navigate(self, url: str) -> str:
             raise BrowserUnavailableError("cannot find Chrome binary")
 
-    result = await Assistant(browser=NoChrome()).browse_to(None, url="example.com")
-
-    assert "browser" in result.lower()
+    with pytest.raises(ToolError, match="browser is not available"):
+        await Assistant(browser=NoChrome()).browse_to(None, url="example.com")
 
 
 @pytest.fixture
 def memory(tmp_path):
-    store = MemoryStore(tmp_path / "agent_memory.db")
+    store = DualMemoryStore(tmp_path / "memories")
     yield store
-    store.close()
 
 
 async def test_remember_then_recall_through_the_tools(memory) -> None:
@@ -842,7 +933,7 @@ def test_no_seed_facts_leaves_no_empty_heading() -> None:
 
 
 def test_format_seed_facts_renders_what_is_stored(memory) -> None:
-    memory.remember("The boss lives in Hyderabad")
+    memory.add("user", "The boss lives in Hyderabad")
     assert "Hyderabad" in _format_seed_facts(memory)
 
 

@@ -1,4 +1,4 @@
-import { ConnectionState, ParticipantKind, RoomEvent } from "livekit-client";
+import { ConnectionState, DataPacket_Kind, ParticipantKind, RoomEvent } from "livekit-client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { HealthResult, ProcessStatus, TokenResult } from "@shared/types";
@@ -117,7 +117,7 @@ class FakeRoom implements RoomLike {
       RoomEvent.DataReceived,
       payload,
       this.remoteParticipants.get("agent-1"),
-      undefined,
+      DataPacket_Kind.RELIABLE,
       "ira.status",
     );
   }
@@ -159,6 +159,7 @@ function setup(
     agentState?: ProcessStatus["state"] | null;
     tokens?: TokenResult[];
     health?: HealthResult;
+    configurationRequired?: boolean;
   } = {},
 ) {
   const rooms: FakeRoom[] = [];
@@ -178,6 +179,7 @@ function setup(
       health: async () => options.health ?? ALL_CONFIGURED,
       processes: async () => ({
         supervised: agentState !== null,
+        configurationRequired: options.configurationRequired,
         agent: agentState === null ? null : agent(agentState),
         bridge: { name: "bridge", state: "ready", restarts: 0 },
       }),
@@ -220,6 +222,18 @@ afterEach(() => {
 
 describe("SessionController", () => {
   describe("waiting for IRA", () => {
+    it("waits for the user's saved credentials without requesting a token or microphone", async () => {
+      const t = setup({ configurationRequired: true });
+      await t.controller.start();
+      t.pushProcess(agent("ready"));
+      await vi.advanceTimersByTimeAsync(90_000);
+
+      expect(t.tokenCalls()).toBe(0);
+      expect(t.rooms).toHaveLength(0);
+      expect(t.snap().connection).toBe("disconnected");
+      expect(t.snap().error).toContain("Connection and Keys");
+    });
+
     it("does not create a room until her worker has registered", async () => {
       // A room created first gets its dispatch before any worker exists to
       // take it -- and nobody ever joins.
@@ -304,6 +318,7 @@ describe("SessionController", () => {
       expect(t.tokenCalls()).toBe(1);
       expect(t.snap().error).toContain("LIVEKIT_URL");
       expect(t.snap().error).toContain("GOOGLE_API_KEY");
+      expect(t.snap().error).toContain("Connection and Keys");
       expect(t.snap().connection).toBe("disconnected");
     });
 
@@ -487,6 +502,139 @@ describe("SessionController", () => {
   });
 
   describe("status stream", () => {
+    it("validates step telemetry and retains waiting skills until resumed or disconnected", async () => {
+      const t = setup();
+      await t.controller.start();
+      await vi.advanceTimersByTimeAsync(0);
+      t.room().agentJoins();
+      t.room().agentAudio();
+      const emit = (state: string, call = "skill-call", overrides = {}) => t.room().emit(RoomEvent.DataReceived,
+        executionPacket(state, call, { tool_name: "run_skill", ...overrides }),
+        t.room().remoteParticipants.get("agent-1"), DataPacket_Kind.RELIABLE, "ira.status");
+      const skill = { source: "skill", skill_run_id: "skill-1", step_index: 1, step_count: 2, step_tool: "browser_click" };
+      emit("DELEGATING");
+      for (const invalid of [{ step_tool: {} }, { step_tool: "x".repeat(129) }, { step_outcome: "secret" }, { step_index: 3, step_count: 2 }]) {
+        emit("RUNNING", "skill-call", { ...skill, ...invalid });
+        expect(t.snap().activities[0].skillRunId).toBeUndefined();
+      }
+      emit("LISTENING", "skill-call", { ...skill, step_outcome: "waiting", outcome: "waiting" });
+      emit("DONE");
+      expect(t.snap().activities[0].phase).toBe("waiting");
+      expect(t.snap().tracker.tool).toBeNull();
+      await vi.advanceTimersByTimeAsync(35_000);
+      expect(t.snap().activities[0].phase).toBe("waiting");
+      emit("VERIFYING", "answer-call", { ...skill, tool_name: "answer_skill", step_outcome: "verifying" });
+      expect(t.snap().activities).toHaveLength(1);
+      expect(t.snap().activities[0].steps?.[0]).toMatchObject({ toolName: "browser_click", phase: "verifying" });
+      t.room().emit(RoomEvent.ConnectionStateChanged, ConnectionState.Reconnecting);
+      expect(t.snap().activities[0].steps?.[0].phase).toBe("unavailable");
+      t.controller.dispose();
+    });
+
+    it("accepts correlated skill progress and refresh notifications", async () => {
+      const t = setup();
+      await t.controller.start();
+      await vi.advanceTimersByTimeAsync(0);
+      t.room().agentJoins();
+      const who = t.room().remoteParticipants.get("agent-1");
+      const emit = (state: string, overrides = {}) => t.room().emit(RoomEvent.DataReceived,
+        executionPacket(state, "skill-call", { tool_name: "run_skill", ...overrides }),
+        who, DataPacket_Kind.RELIABLE, "ira.status");
+      emit("DELEGATING");
+      emit("VERIFYING", {source: "skill", skill_run_id: "skill-1", skill_slug: "notes", skill_version: 2, step_index: 1, step_count: 2});
+      expect(t.snap().activities[0]).toMatchObject({skillRunId: "skill-1", progress: "Step 1 of 2", phase: "verifying"});
+      const events: unknown[] = [];
+      t.controller.subscribeEvents((event) => events.push(event));
+      t.room().emit(RoomEvent.DataReceived, new TextEncoder().encode('{"type":"skills.changed"}'), who, DataPacket_Kind.RELIABLE, "ira.events");
+      expect(events).toEqual([{type: "skills.changed"}]);
+    });
+
+    const executionPacket = (state: string, callId = "call-1", overrides = {}) =>
+      new TextEncoder().encode(JSON.stringify({
+        state, detail: "read_page", run_id: "run-1", call_id: callId,
+        tool_name: "read_page", source: "lifecycle", ...overrides,
+      }));
+
+    it("keeps separate actions and clears only finished history", async () => {
+      const t = setup();
+      await t.controller.start();
+      await vi.advanceTimersByTimeAsync(0);
+      t.room().agentJoins();
+      const who = t.room().remoteParticipants.get("agent-1");
+      const emit = (state: string, id: string) => t.room().emit(RoomEvent.DataReceived,
+        executionPacket(state, id), who, DataPacket_Kind.RELIABLE, "ira.status");
+      emit("DELEGATING", "call-1");
+      emit("DELEGATING", "call-2");
+      emit("DONE", "call-1");
+      expect(t.snap().activities).toHaveLength(2);
+      expect(t.snap().activities.find((item) => item.callId === "call-2")?.phase).toBe("running");
+      expect(t.snap().tracker.tool?.name).toBe("read_page");
+      t.controller.clearExecutionHistory();
+      expect(t.snap().activities.map((item) => item.callId)).toEqual(["call-2"]);
+    });
+
+    it("rejects forged and malformed execution events", async () => {
+      const t = setup();
+      await t.controller.start();
+      await vi.advanceTimersByTimeAsync(0);
+      t.room().agentJoins();
+      const who = t.room().remoteParticipants.get("agent-1");
+      const emit = (payload: Uint8Array, sender: unknown = who, kind = DataPacket_Kind.RELIABLE) =>
+        t.room().emit(RoomEvent.DataReceived, payload, sender, kind, "ira.status");
+      emit(executionPacket("DELEGATING"), { identity: "fake", kind: ParticipantKind.AGENT });
+      emit(executionPacket("DELEGATING"), who, DataPacket_Kind.LOSSY);
+      for (const value of [null, [], { state: {} }, { state: "DONE", call_id: 7 }, { state: "DELEGATING", source: "lifecycle", run_id: "run", call_id: "x" }]) {
+        emit(new TextEncoder().encode(JSON.stringify(value)));
+      }
+      expect(t.snap().tracker.tool).toBeNull();
+      expect(t.snap().activities).toEqual([]);
+      emit(executionPacket("DELEGATING"));
+      expect(t.snap().activities).toHaveLength(1);
+    });
+
+    it("marks work unavailable on reconnect and expires a missing end", async () => {
+      const t = setup();
+      await t.controller.start();
+      await vi.advanceTimersByTimeAsync(0);
+      t.room().agentJoins();
+      const emit = (state: string, id: string) => t.room().emit(RoomEvent.DataReceived,
+        executionPacket(state, id), t.room().remoteParticipants.get("agent-1"),
+        DataPacket_Kind.RELIABLE, "ira.status");
+      emit("DELEGATING", "call-1");
+      t.room().emit(RoomEvent.ConnectionStateChanged, ConnectionState.Reconnecting);
+      expect(t.snap().activities[0].phase).toBe("unavailable");
+      expect(t.snap().tracker.tool).toBeNull();
+      t.room().emit(RoomEvent.ConnectionStateChanged, ConnectionState.Connected);
+      emit("RUNNING", "call-1");
+      expect(t.snap().activities[0].phase).toBe("running");
+      await vi.advanceTimersByTimeAsync(30_001);
+      expect(t.snap().activities[0].phase).toBe("unavailable");
+      t.controller.dispose();
+    });
+
+    it("delivers reliable task notifications only from the room's agent", async () => {
+      const t = setup();
+      await t.controller.start();
+      await vi.advanceTimersByTimeAsync(0);
+      t.room().agentJoins();
+      const events: unknown[] = [];
+      const unsubscribe = t.controller.subscribeEvents((event) => events.push(event));
+      const packet = new TextEncoder().encode(JSON.stringify({ type: "tasks.changed" }));
+      const who = t.room().remoteParticipants.get("agent-1");
+      const emit = (payload: Uint8Array, sender: unknown = who, kind = DataPacket_Kind.RELIABLE, topic = "ira.events") => t.room().emit(RoomEvent.DataReceived, payload, sender, kind, topic);
+      emit(packet);
+      expect(events).toEqual([{ type: "tasks.changed" }]);
+      emit(packet, { identity: "intruder", kind: ParticipantKind.STANDARD, attributes: { "lk.agent.state": "listening" } });
+      emit(packet, null);
+      emit(packet, who, DataPacket_Kind.LOSSY);
+      emit(packet, who, DataPacket_Kind.RELIABLE, "elsewhere");
+      for (const value of ["bad json", "null", "[]", '{"type":"other"}', '{"type":"tasks.changed","task":{"title":"untrusted"}}']) emit(new TextEncoder().encode(value));
+      expect(events).toHaveLength(1);
+      unsubscribe();
+      emit(packet);
+      expect(events).toHaveLength(1);
+    });
+
     it("keeps a tool in flight while she talks over it", async () => {
       const t = setup();
       await t.controller.start();

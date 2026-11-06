@@ -39,7 +39,7 @@ export function CommandBar({
         event.preventDefault();
         submit();
       }}
-      className="panel mx-auto flex w-full max-w-[920px] items-center gap-2.5 rounded-full px-3 py-2"
+      className="command-glass panel mx-auto flex w-full max-w-[920px] items-center gap-2.5 rounded-full px-3 py-2"
     >
       <button
         type="button"
@@ -47,7 +47,7 @@ export function CommandBar({
         aria-label={micEnabled ? "Mute microphone" : "Unmute microphone"}
         aria-pressed={micEnabled}
         className="grid size-9 shrink-0 place-items-center rounded-full transition-colors hover:bg-white/[0.07]"
-        style={{ color: micEnabled ? "#22D3EE" : "#5A7290" }}
+        style={{ color: micEnabled ? "var(--color-cyan)" : "var(--color-mute)" }}
       >
         <Mic size={16} strokeWidth={1.9} />
       </button>
@@ -66,7 +66,7 @@ export function CommandBar({
         aria-label="Attach a file"
         disabled
         // Present but inert: attachments need a file path IRA can actually
-        // read, which is sub-project C's work. Visible and disabled is honest;
+        // read, which needs a future file-handoff design. Visible and disabled is honest;
         // a button that silently does nothing is not.
         className="grid size-9 shrink-0 place-items-center rounded-full text-mute/50 transition-colors disabled:cursor-not-allowed"
       >
@@ -81,7 +81,7 @@ export function CommandBar({
         animate={{ opacity: canSend ? 1 : 0.4 }}
         className="grid size-9 shrink-0 place-items-center rounded-full text-deep disabled:cursor-not-allowed"
         style={{
-          background: "linear-gradient(140deg,#67E8F9,#2E7BFF)",
+          background: "linear-gradient(140deg,var(--color-cyan),var(--color-blue))",
           boxShadow: canSend ? "var(--glow-cyan-soft)" : "none",
         }}
       >

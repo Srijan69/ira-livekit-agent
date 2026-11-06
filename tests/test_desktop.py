@@ -12,7 +12,7 @@ class FakeScreenshot:
         Path(path).write_bytes(b"png-data")
 
     def convert(self, mode: str):
-        assert mode == "RGB"
+        assert mode in ("RGB", "RGBA")
         return self
 
     def tobytes(self) -> bytes:
@@ -84,3 +84,13 @@ def test_missing_desktop_backend_is_explicit() -> None:
 
     with pytest.raises(DesktopUnavailableError):
         desktop.screen_size()
+
+
+def test_capture_screen_failure_raises_desktop_unavailable_error(tmp_path) -> None:
+    class FailingMouse:
+        def screenshot(self):
+            raise RuntimeError("display grab failed")
+
+    desktop = DesktopController(mouse=FailingMouse(), capture_dir=tmp_path)
+    with pytest.raises(DesktopUnavailableError, match="Screen capture failed"):
+        desktop.capture_screen()

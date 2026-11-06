@@ -19,7 +19,7 @@ const CIRCUMFERENCE = 2 * Math.PI * RADIUS;
 function loadColor(percent: number): string {
   if (percent >= 95) return "#EF4444";
   if (percent >= 85) return "#F59E0B";
-  return "#22D3EE";
+  return "var(--color-cyan)";
 }
 
 function batteryColor(percent: number, charging: boolean): string {
@@ -90,7 +90,7 @@ function Ring({
             strokeDasharray={CIRCUMFERENCE}
             style={{
               strokeDashoffset: percent === null ? CIRCUMFERENCE : offset,
-              filter: `drop-shadow(0 0 5px ${color}66)`,
+              filter: `drop-shadow(0 0 5px color-mix(in srgb, ${color} 40%, transparent))`,
             }}
           />
         </svg>

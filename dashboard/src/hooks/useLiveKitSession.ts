@@ -18,6 +18,7 @@ import {
   type SessionSnapshot,
 } from "@/lib/sessionController";
 import { orbStatusFrom } from "@/lib/statusTracker";
+import type { IraEvent } from "@shared/types";
 
 const NO_BRIDGE =
   "No desktop bridge -- this is the browser preview. Run the Electron app to talk to IRA.";
@@ -38,6 +39,12 @@ export function useLiveKitSession(): Session {
   const [snapshot, setSnapshot] = useState<SessionSnapshot>(INITIAL_SNAPSHOT);
   const controllerRef = useRef<SessionController | null>(null);
   const meterRef = useRef<AudioMeter | null>(null);
+  const eventListeners = useRef(new Set<(event: IraEvent) => void>());
+  const [connectionVersion, setConnectionVersion] = useState(0);
+
+  useEffect(() => window.ira?.connection?.onChanged(() => {
+    setConnectionVersion((version) => version + 1);
+  }), []);
 
   useEffect(() => {
     const bridge = window.ira;
@@ -47,6 +54,7 @@ export function useLiveKitSession(): Session {
     }
 
     const meter = new AudioMeter();
+    setSnapshot(INITIAL_SNAPSHOT);
     const controller = new SessionController({
       bridge: {
         token: () => bridge.session.token(),
@@ -70,6 +78,9 @@ export function useLiveKitSession(): Session {
     meterRef.current = meter;
     controllerRef.current = controller;
     const unsubscribe = controller.subscribe(setSnapshot);
+    const unsubscribeEvents = controller.subscribeEvents((event) => {
+      for (const listener of eventListeners.current) listener(event);
+    });
     void controller.start();
 
     // StrictMode mounts, unmounts and remounts in development. Each mount owns
@@ -77,12 +88,13 @@ export function useLiveKitSession(): Session {
     // rather than raced.
     return () => {
       unsubscribe();
+      unsubscribeEvents();
       controller.dispose();
       meter.close();
       controllerRef.current = null;
       meterRef.current = null;
     };
-  }, []);
+  }, [connectionVersion]);
 
   // The error flash and the stale-tool safety net are both functions of time.
   // Nothing in the session changes when they lapse, so schedule the re-render
@@ -136,7 +148,19 @@ export function useLiveKitSession(): Session {
     controllerRef.current?.send(text);
   }, []);
 
+  const subscribeEvents = useCallback((listener: (event: IraEvent) => void) => {
+    eventListeners.current.add(listener);
+    return () => { eventListeners.current.delete(listener); };
+  }, []);
+
+  const clearExecutionHistory = useCallback(() => {
+    controllerRef.current?.clearExecutionHistory();
+  }, []);
+
   return {
+    activities: snapshot.activities,
+    clearExecutionHistory,
+    subscribeEvents,
     connection: snapshot.connection,
     orbState,
     cues: activeCuesFrom(input),

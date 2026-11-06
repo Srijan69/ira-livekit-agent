@@ -4,6 +4,14 @@ This is a LiveKit Agents project. LiveKit Agents is a Python SDK for building vo
 
 The following is a guide for working with this project.
 
+## Two agents work here in parallel
+
+Claude owns the backend (`src/`, `tests/`, `workflows/`); Codex owns the
+dashboard (`dashboard/`). Before editing outside your area, read
+[`docs/handoff/COORDINATION.md`](docs/handoff/COORDINATION.md): it lists the
+contracts between the two halves and is where each agent requests changes
+from the other.
+
 ## Project structure
 
 This Python project uses the `uv` package manager. You should always use `uv` to install dependencies, run the agent, and run tests.
@@ -51,3 +59,12 @@ Important: When modifying core agent behavior such as instructions, tool descrip
 ## LiveKit CLI
 
 Beyond documentation access, the LiveKit CLI (`lk`) supports other tasks such as managing SIP trunks for telephony-based agents. Run `lk --help` to explore available commands.
+
+## Ownership update — 2026-10-17
+
+The user has explicitly transferred both frontend and backend work to Codex
+while Claude Code is unavailable. This supersedes the earlier Claude/backend
+and Codex/dashboard ownership split and the corresponding cross-owner request
+requirement in `docs/handoff/COORDINATION.md`. Codex may work across `src/`,
+`tests/`, `workflows/`, `dashboard/`, and shared contracts. Preserve the existing
+uncommitted work and validate both consumers when changing a shared contract.

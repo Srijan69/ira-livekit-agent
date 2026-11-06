@@ -21,7 +21,7 @@ export function Waveform({
   active,
   width = 320,
   height = 44,
-  color = "#22D3EE",
+  color = "var(--color-cyan)",
 }: {
   /** Current loudness, 0..1. Called once per frame. */
   getLevel: () => number;
@@ -47,6 +47,9 @@ export function Waveform({
     canvas.width = width * dpr;
     canvas.height = height * dpr;
     context.scale(dpr, dpr);
+    // Canvas cannot resolve CSS variables in fillStyle. Resolve the canvas's
+    // theme color once; the selected theme is applied before this view mounts.
+    const resolvedColor = getComputedStyle(canvas).color;
 
     const centre = height / 2;
     const totalWidth = BAR_COUNT * BAR_WIDTH + (BAR_COUNT - 1) * BAR_GAP;
@@ -80,7 +83,7 @@ export function Waveform({
         const x = startX + i * (BAR_WIDTH + BAR_GAP);
 
         context.globalAlpha = 0.25 + next * 0.75;
-        context.fillStyle = color;
+        context.fillStyle = resolvedColor;
         context.beginPath();
         context.roundRect(
           x,
@@ -112,7 +115,7 @@ export function Waveform({
     <canvas
       ref={canvasRef}
       aria-hidden
-      style={{ width, height }}
+      style={{ width, height, color }}
       className="block"
     />
   );

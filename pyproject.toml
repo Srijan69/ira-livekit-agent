@@ -11,8 +11,11 @@ requires-python = ">=3.10, <3.15"
 dependencies = [
     # The [google] extra pulls in livekit-plugins-google, which provides the
     # Gemini Live API realtime model used in src/agent.py.
-    "livekit-agents[google]>=1.8",
+    "livekit-agents[google]>=1.8.8",
     "livekit-plugins-ai-coustics~=0.2",
+    "openpyxl>=3.1.5",
+    "pillow>=12.3.0",
+    "psutil>=7.2.2",
     "pyautogui>=0.9.54",
     "python-dotenv",
     # Drives a real Chrome window for the browser tools in src/browser.py.
@@ -20,6 +23,7 @@ dependencies = [
     # matching chromedriver itself -- so there is no driver binary to install
     # by hand or keep in step with Chrome upgrades.
     "selenium>=4.27",
+    "uiautomation>=2.0.29 ; sys_platform == 'win32'",
 ]
 
 [dependency-groups]
@@ -46,6 +50,10 @@ asyncio_default_fixture_loop_scope = "function"
 # Lets tests do `from agent import Assistant` -- src/ is not an installed
 # package, so without this pytest only puts tests/ on sys.path.
 pythonpath = ["src"]
+filterwarnings = [
+    "ignore:.*_UnionGenericAlias.*:DeprecationWarning",
+    "ignore:.*google.genai.*:DeprecationWarning",
+]
 
 [tool.ruff]
 line-length = 88

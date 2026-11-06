@@ -17,6 +17,24 @@ Electron, TypeScript, React, pytest, and Vitest.
 
 **Spec:** `docs/superpowers/specs/2026-11-06-profile-and-context-memory-design.md`.
 
+**Status:** completed and locally verified on November 6, 2026.
+
+**Verification:** 402 affected backend tests passed (four live tests skipped),
+355 dashboard tests passed, TypeScript and production build passed. Actual built
+Electron smoke verified the profile/memory flows at two window sizes with 15
+screenshots. The existing Connection and Keys smoke passed with a fresh profile,
+the real bridge, and no inherited keys. Provider requests used synthetic SDK
+transports in tests; live account/model availability and voice quality remain
+runtime checks, not claims based on offline tests.
+
+**Review resolutions:** Ordered journal retry blocks admission/compaction during
+storage failure; conversation ownership prevents live-session journal merging;
+orphan calls become interrupted background records. Fresh child events confirm
+readiness, while raised and emitted restart failures clear it. Revision checks
+cover direct profile/legacy refreshes. Dynamic snapshot bounds preserve canonical
+profile and accepted summary priority. Compact policy keeps detailed tool schemas
+while reserving room for actual memory and recent turns.
+
 ## Global constraints and rulings
 
 - Preserve all existing uncommitted work and Connection and Keys behavior.
@@ -92,13 +110,13 @@ Mutations accept `expected_revision` where applicable; conflict is HTTP409,
 invalid input400, all routes require the existing bridge secret. Route methods
 run blocking storage in `asyncio.to_thread`.
 
-- [ ] Write and run failing tests for profile roundtrip/clear/age validation,
+- [x] Write and run failing tests for profile roundtrip/clear/age validation,
   revision conflict, journal dedupe, checkpoint roundtrip and stale job rejection.
-- [ ] Implement SQLite transactional storage, indexed bounded retrieval,
+- [x] Implement SQLite transactional storage, indexed bounded retrieval,
   profile precedence, independent revisions, deletion exclusions and recovery.
-- [ ] Write/run bridge authorization, malformed input, conflict, inspect/delete,
+- [x] Write/run bridge authorization, malformed input, conflict, inspect/delete,
   and reset tests against real aiohttp routes and temporary stores.
-- [ ] Verify `uv run python -m pytest tests/test_personal_memory.py tests/test_personal_memory_bridge.py -q`.
+- [x] Verify `uv run python -m pytest tests/test_personal_memory.py tests/test_personal_memory_bridge.py -q`.
 
 ## Task 2: Summary generation and safe compaction controller
 
@@ -131,16 +149,16 @@ Profile is authoritative data. All output source IDs must come from supplied
 items or the previous accepted summary. Outcome claims require terminal source
 tool records. Cap summary size and reject malformed output and unknown IDs.
 
-- [ ] Red/green tests for tools-disabled Google async request using environment
+- [x] Red/green tests for tools-disabled Google async request using environment
   key, timeout, malformed JSON/schema, source validation and cumulative summary.
-- [ ] Red/green tests for real store/controller thresholds, hysteresis,
+- [x] Red/green tests for real store/controller thresholds, hysteresis,
   single-flight, stable prefix, recent tail and whole tool groups.
-- [ ] Keep voice free while summary runs, persist before apply, recheck revisions
+- [x] Keep voice free while summary runs, persist before apply, recheck revisions
   and idle state, preserve arrivals after watermark, re-check reconstructed
   budget, and prepare another prefix if the tail exceeds reserve.
-- [ ] Cover busy deferral, failure retry, disabled mode, final bounded flush,
+- [x] Cover busy deferral, failure retry, disabled mode, final bounded flush,
   crash recovery, deletion during summary, and no action replay on compaction.
-- [ ] Verify `uv run python -m pytest tests/test_context_summary.py tests/test_context_memory.py -q`.
+- [x] Verify `uv run python -m pytest tests/test_context_summary.py tests/test_context_memory.py -q`.
 
 ## Task 3: Profile and Memory Settings interface
 
@@ -160,11 +178,11 @@ conflict keeps unsaved input, profile names/initials update sidebar, reset clear
 canonical fields, memory list supports search/delete/clear and last checkpoint.
 Browser preview handles absence of bridge with a clear unavailable message.
 
-- [ ] Red/green tests for optional fields, save/reset, validation, unsaved errors,
+- [x] Red/green tests for optional fields, save/reset, validation, unsaved errors,
   concurrent refresh, sidebar name update, and memory inspect/delete/clear.
-- [ ] Implement accessible keyboard tabs and responsive panels matching Settings.
-- [ ] Preserve personalization and Connection and Keys behavior.
-- [ ] Verify scoped Vitest, TypeScript and build; capture actual Electron layout.
+- [x] Implement accessible keyboard tabs and responsive panels matching Settings.
+- [x] Preserve personalization and Connection and Keys behavior.
+- [x] Verify scoped Vitest, TypeScript and build; capture actual Electron layout.
 
 ## Task 4: Root integration, review, and end-to-end verification
 
@@ -173,23 +191,23 @@ Browser preview handles absence of bridge with a clear unavailable message.
 `src/bridge.py`, `src/agent.py`, `src/realtime_model.py` only if required;
 **Create:** `src/personal_memory_agent.py`, focused integration tests and probes.
 
-- [ ] Author shared profile/settings/memory APIs to match Task1 primitive JSON.
-- [ ] Register authenticated backend routes and Electron proxy/event handling.
-- [ ] Attach a persistent-memory facade to existing voice memory tools, preserving
+- [x] Author shared profile/settings/memory APIs to match Task1 primitive JSON.
+- [x] Register authenticated backend routes and Electron proxy/event handling.
+- [x] Attach a persistent-memory facade to existing voice memory tools, preserving
   fake/injected stores and refreshing snapshots after changes.
-- [ ] Build startup instructions from canonical profile, filtered legacy memory
+- [x] Build startup instructions from canonical profile, filtered legacy memory
   and latest summary. Explicit voice profile correction uses same store.
-- [ ] Attach trusted finalized transcript/chat and committed assistant/tool
+- [x] Attach trusted finalized transcript/chat and committed assistant/tool
   events to controller. Record no screenshots as human profile facts.
-- [ ] Observe latest model prompt tokens; apply compacted context via
+- [x] Observe latest model prompt tokens; apply compacted context via
   `await assistant.update_chat_ctx(...)` and public same-model restart at idle.
   Track current-generation events, never enable regeneration, revoke old scope
   and invalidate old desktop evidence. Poll profile/memory revisions at idle.
-- [ ] Wire bounded shutdown flush, close workers/client, and reopen recovery.
-- [ ] Independently review storage, controller, UI and integrated runtime against
+- [x] Wire bounded shutdown flush, close workers/client, and reopen recovery.
+- [x] Independently review storage, controller, UI and integrated runtime against
   the approved spec. Resolve correctness/privacy/replay defects and retest.
-- [ ] Run backend affected suites, all dashboard tests, TypeScript and production
+- [x] Run backend affected suites, all dashboard tests, TypeScript and production
   build. Use actual SDK fakes and real bridge/Electron probes for profile startup,
   compacted-context restoration, persistence, deletion and existing key isolation.
-- [ ] Verify each spec requirement before marking the goal complete; document
+- [x] Verify each spec requirement before marking the goal complete; document
   provider verification limits without claiming synthetic tests are live voice.

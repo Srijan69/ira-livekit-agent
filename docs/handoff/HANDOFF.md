@@ -3,6 +3,47 @@
 **For:** the next coding agent (Codex) · **From:** a Claude Code session · **Date:** 2026-10-15
 **Repo:** `C:\Users\kommi\VS code projects\livekit-voice-agent` · **Branch:** `feat/ira-desktop-dashboard`
 
+**Codex continuation, 2026-10-15:** sub-project C and Gemini primary/fallback
+integration are implemented in the working tree. See §2 for current verification.
+The original A/B history and C acceptance criteria are retained below.
+
+**Desktop shortcut and orb follow-up, 2026-10-15:** `IRA.lnk` is installed in
+the Windows Desktop folder (OneDrive on this machine). Recreate it after a build
+with `dashboard/scripts/create-shortcut.ps1`; it launches the local Electron
+executable directly and uses `dashboard/assets/ira.ico`. It depends on this
+checkout, its Python environment, and `dashboard/node_modules`; it is not an
+installer. The same icon is used for the app window.
+
+The orb now has blue segmented outer bands, dense ticks, illuminated inner
+segments, dark housing and a solid plinth. It scales with stage height to fit
+the minimum 1180x800 window. See [reference / before / after](orb-comparison.png)
+(browser preview; scripted state). Existing state speeds, HTML-layer rotation,
+and reduced-motion behavior are retained.
+
+Checks: 133 Vitest tests, TypeScript and production build pass. Browser checks
+covered 1536x1024 and 1180x800, reduced-motion freezing, and renderer errors.
+Launching the actual desktop shortcut started the bridge and agent with zero
+restarts, reached Online, attached the voice element and showed no error banner.
+Opening it again reused the running app. Spoken response quality and model
+failover were not evaluated in this visual/launcher follow-up.
+
+**Supplied background and glass styling, verified 2026-10-16:** the Home scene
+now uses the user's `Futuristic Command Deck Overlooking Neon City.png`, bundled
+unchanged as `dashboard/assets/command-deck.png`. This supersedes the original
+procedural-background decision in Appendix Section 2. The sidebar, widget rail,
+action cards and command bar use perspective and glass styling closer to the
+reference. The approved orb stays animated and aligns with the image's platform;
+its separate drawn base is hidden on Home to avoid duplicating the platform.
+
+Latest [background preview](current-home-background.png) is a 1536x1024 browser
+capture with a scripted session; system stats and tasks require the desktop app.
+The 1180x800 and 1180x1024 layouts were also visually checked. Chat/Home navigation,
+command submission and microphone toggling work in the preview, with no browser
+errors or horizontal overflow. All 133 Vitest tests, TypeScript checks and the
+production build pass. The emitted background matches the original SHA256, and
+the production renderer uses the live session. The existing desktop shortcut
+targets this rebuilt app; real voice was not relaunched in this final check.
+
 Read [`AGENTS.md`](../../AGENTS.md) first — it is binding for this repo (uv, ruff, test-driven
 changes to agent behaviour, and tests that never touch the real desktop, browser, database or
 network). Then read this file top to bottom before changing anything.
@@ -22,12 +63,17 @@ network). Then read this file top to bottom before changing anything.
   |---|---|---|
   | **A** | Electron shell + Home page UI + animation | ✅ done |
   | **B** | Voice spine: token bridge, dispatch, typed commands, live orb state | ✅ done, verified on the real app |
-  | **C** | Live widgets: tasks (SQLite + voice tools), weather, IRA's `system_status` tool | ⏭ **next** — see §7.1 |
+  | **C** | Live widgets: tasks (SQLite + voice tools), weather, IRA's `system_status` tool | ✅ implemented and verified offline — see §2 |
   | **D** | Presence + packaging: tray, global hotkey, autostart, installer | later — see §7.2 |
 
-- How it looks now: [current-home-speaking.png](current-home-speaking.png) (IRA speaking).
-- Tests: **95 renderer** (Vitest) and **156 Python** (pytest) pass. Four *live* Gemini evals
-  currently time out for a reason unrelated to this work — see §4.
+- Current visual preview: [current-home-background.png](current-home-background.png),
+  with the user's supplied scene and a scripted session.
+- Earlier widget preview: [current-home-widgets.png](current-home-widgets.png), using
+  sample data and a scripted session. The earlier real-voice screenshot remains
+  [current-home-speaking.png](current-home-speaking.png).
+- Tests: **133 Vitest** and **306 Python** pass; **4 live Gemini evals skip by default**.
+  TypeScript, Ruff and the production build pass. Live voice/provider failover
+  was not revalidated in this continuation.
 
 ---
 
@@ -71,8 +117,8 @@ quick-action cards, the command bar and suggestion chips.
 
 - **Real:** window chrome and dragging, navigation, clock and greeting, the orb's state machine
   and animation, live system stats.
-- **Mocked, and only here:** [`dashboard/src/lib/mock.ts`](../../dashboard/src/lib/mock.ts) —
-  weather, tasks, and the user's name and tier. Sub-project C deletes this file.
+- C removed `dashboard/src/lib/mock.ts`: weather and tasks now load real data.
+  The name/tier are explicit local display defaults in `dashboard/src/lib/profile.ts`.
 
 ### Sub-project B — done
 
@@ -91,7 +137,52 @@ quick-action cards, the command bar and suggestion chips.
   to React, `AudioMeter` plays IRA and measures loudness for the waveform, `statusTracker`
   follows tool calls, and `StatusBanner` names failures.
 
-### Verified end to end on the real app (2026-10-15)
+### Sub-project C and model migration — implemented
+
+- **C1–C3:** explicit SQLite busy timeout; lazy, locked `TaskStore`; authenticated
+  bridge CRUD with UTC dates, 500-character titles, limits of 1–100 and 400/404 errors.
+  Bridge and agent use the same `IRA_MEMORY_DB` and close their stores on shutdown.
+- **C4:** `current_time`, `add_task`, `list_tasks`, `complete_task`, reliable
+  `ira.events` invalidation, isolated simulation mocks and a task scenario.
+  User chose a current-time tool for relative dates. Tasks are saved to-dos, not alarms.
+- **C5:** named task IPC, secret kept in main, task hook and real Home list.
+  Eight upcoming tasks by default; View All requests up to 100. Optimistic
+  completion rolls back on failure. Refreshes follow voice writes, room reconnect
+  and bridge readiness. Only reliable events from room agent participants qualify.
+- **C6:** `system_status` uses injected psutil, with explicit dependency and a short
+  CPU sample off the event loop. Missing batteries return null.
+- **C7:** Open-Meteo current data, WMO conditions, day/night icons, per-location
+  cache and 15-minute visible polling. User chose Hyderabad by default with an
+  editable city search. Offline refreshes retain the last good reading and its age.
+- **C8:** all quick actions ask one focused question before helping, as requested.
+  Attachments remain disabled. README covers startup and the unfinished pages.
+- **Models:** `gemini-3.8-live` primary, `gemini-2.5-flash-native-audio-latest`
+  fallback. Both use Google AI Studio's Developer API, Kore and direct audio.
+  Optional `IRA_GEMINI_PRIMARY_MODEL` / `IRA_GEMINI_FALLBACK_MODEL` overrides
+  accept compatible Live models. Extended Thinking is excluded pending its
+  separate interaction/tool lifecycle. No STT/TTS was introduced.
+- **Failover:** LiveKit preserves context, instructions and tools; interrupted
+  user actions are never automatically replayed. Only the tools-disabled startup
+  greeting retries once after a model swap. Exhaustion surfaces an error.
+  `src/realtime_model.py` contains one SDK-private compatibility shim for
+  generation-future failures, tested against the locked LiveKit 1.8.8 release.
+
+**Verification (2026-10-15):** 306 Python tests passed, four live evals skipped;
+133 Vitest tests passed; both TypeScript configs, Ruff lint/format, and Electron
+production build passed. One upstream `google.genai` deprecation warning remains.
+Browser QA at 1440×900 used fake task IPC, weather and system readings: expanded
+list, successful save, save rollback, city selection/persistence, stale weather,
+and quick-action text were checked. No page errors or horizontal overflow remained.
+SQLite durability and voice-to-panel invalidation were verified through isolated
+tests, not a real voice session. No personal database or microphone was used.
+
+**Still unverified:** live access on this Google key, spoken response quality,
+live provider failover and the cloud simulation scenario. The installed `lk`
+2.13.2 is too old for current docs/simulation commands; upgrade with
+`winget upgrade LiveKit.LiveKitCLI`. Documentation was fetched from public Google,
+LiveKit and Open-Meteo URLs. D and other sidebar pages remain out of scope.
+
+### Historical B verification on the real app (2026-10-15, before model migration)
 
 Run with `npx electron .` plus `scripts/e2e-probe.cjs` (see §3):
 
@@ -133,18 +224,16 @@ Heads-up: the live app opens the microphone and IRA speaks through the speakers.
 # Renderer + supervisor (Vitest), both tsconfigs
 cd dashboard && npm test && npm run typecheck
 
-# Python (from the repo root). The four live Gemini evals are deselected -- see below.
-uv run pytest -p no:randomly \
-  --deselect tests/test_agent.py::test_replies_in_character_as_ira \
-  --deselect tests/test_agent.py::test_leads_with_the_answer \
-  --deselect tests/test_agent.py::test_does_not_invent_a_meaning_for_her_name \
-  --deselect tests/test_agent.py::test_calls_open_app_when_asked_to_open_something
-uv run ruff check && uv run ruff format --check
+# Python (repo root); live provider evals skip unless explicitly enabled.
+uv run pytest -q -p no:randomly
+uv run ruff check src tests
+uv run ruff format --check src tests
 ```
 
-- **The live evals are flaky right now**, failing with `generate_reply timed out waiting for
-  generation_created event`. The *baseline* commit `a73d804` fails them the same way, so it is
-  the remote API, not this work. Run them separately and expect intermittent timeouts.
+- **Live evals are opt-in:** set `IRA_RUN_LIVE_EVALS=1` and provide `GOOGLE_API_KEY`.
+  Earlier B-era runs timed out with `generate_reply timed out waiting for
+  generation_created event`, including on baseline `a73d804`. Do not treat those
+  historical runs as validation of the new model pair.
 - **Visual check** (renderer only, scripted session):
   ```bash
   cd dashboard
@@ -172,7 +261,7 @@ Electron main ──spawns──▶ uv run python src/bridge.py --port <free>   
    │          ──spawns──▶ uv run python src/agent.py dev               (LiveKit worker "my-agent")
    │ IPC (contextBridge, named operations only)
    ▼
-Renderer ──IPC──▶ main ──HTTP + secret──▶ bridge: /token, /health
+Renderer ──IPC──▶ main ──HTTP + secret──▶ bridge: /token, /health, /tasks
    │
    └──WebRTC──▶ LiveKit Cloud ◀── agent worker, summoned by the dispatch inside the token
 ```
@@ -208,6 +297,12 @@ Renderer ──IPC──▶ main ──HTTP + secret──▶ bridge: /token, /h
   `canPublishData` only, plus `roomConfig.agents = [{agentName: "my-agent"}]`.
 - `GET /health` → `{bridge: "ok", config: {livekit_url, api_key, api_secret, google_api_key}}`,
   all booleans. Deliberately reachable without the secret.
+- Task routes require the secret: `GET /tasks?limit=8` → `{tasks:[...]}`;
+  `POST /tasks {title,due_at?}` → 201 `{task:...}`;
+  `PATCH /tasks/{id} {done}` → 200 `{task:...}`;
+  `DELETE /tasks/{id}` → 200 `{deleted:true}`. IDs cross JSON as strings.
+  Invalid input returns 400; a missing task returns 404. Dates require an explicit
+  timezone and normalize to UTC `Z`. Completed rows are excluded from upcoming.
 
 ### LiveKit
 
@@ -215,6 +310,7 @@ Renderer ──IPC──▶ main ──HTTP + secret──▶ bridge: /token, /h
 |---|---|---|
 | text stream, topic `lk.chat` | UI → IRA | Command bar, quick actions, chips. The SDK's handler interrupts her and replies, exactly as if spoken. |
 | data, topic `ira.status` | IRA → UI | JSON `{run_id, label, state, detail, at}`. States: `LISTENING`, `RECOGNIZING`, `GENERATING`, `SPEAKING`, `DELEGATING <tool>`, `RUNNING <progress>`, `VERIFYING`, `DONE <tool>`, `ERROR <tool>`. |
+| data, topic `ira.events` | IRA → UI | Reliable `{type:"tasks.changed"}` after a task write; the panel refetches records through the bridge. |
 | participant attribute `lk.agent.state` | IRA → UI | `initializing` / `idle` / `listening` / `thinking` / `speaking` |
 | text stream, topic `lk.transcription` | IRA → UI | The SDK's transcripts — not consumed yet (a future Chat page) |
 
@@ -223,6 +319,8 @@ Renderer ──IPC──▶ main ──HTTP + secret──▶ bridge: /token, /h
 `ira:stats` (push), `ira:stats:snapshot`, `ira:window:minimize`, `ira:window:close`,
 `ira:window:toggle-always-on-top`, `ira:session:token`, `ira:health`, `ira:agent:status`,
 `ira:agent:status-push` (push), `ira:agent:restart`, `ira:agent:logs`.
+
+C adds `ira:tasks:list`, `ira:tasks:create`, `ira:tasks:update`, `ira:tasks:delete`.
 
 ### Readiness signals and environment variables
 
@@ -273,8 +371,8 @@ Renderer ──IPC──▶ main ──HTTP + secret──▶ bridge: /token, /h
     dispatch an `input` event, or React never sees it (see `e2e-probe.cjs`). Tailwind's
     arbitrary class names (`text-[12px]`) need escaping in `querySelector`, so the probe matches
     elements by visible text instead.
-14. **`psutil` is only a transitive dependency** (via `livekit-agents`). Declare it with
-    `uv add psutil` before importing it directly.
+14. **`psutil` is now an explicit dependency.** CPU sampling is off the event loop;
+    a short blocking sample avoids a fresh worker thread's empty CPU baseline.
 15. **The `lk` CLI here is 2.13.2**; `lk docs` needs 2.15.0 or newer
     (`winget upgrade LiveKit.LiveKitCLI`). AGENTS.md asks you to use it for LiveKit docs and to
     file docs feedback.
@@ -285,7 +383,7 @@ Renderer ──IPC──▶ main ──HTTP + secret──▶ bridge: /token, /h
 
 ## 7. Next work, in order
 
-### 7.1 Sub-project C — live widgets and tasks (next)
+### 7.1 Sub-project C — completed acceptance criteria (historical specification)
 
 Write tests first throughout (AGENTS.md). Each step lists what "done" means.
 
@@ -316,7 +414,7 @@ memory store caps facts at 500).
 any write, publish `{"type":"tasks.changed"}` on a new reliable data topic, `ira.events`. Add a
 scenario to `scenarios.yaml` ("add a task by voice"), mocking the tool in the entrypoint behind
 `ctx.simulation_context()` the way `open_app` already is.
-**Open question for the user:** IRA does not know the current date, so she cannot turn "tomorrow
+**Resolved: user chose (b), `current_time`.** Original question: IRA does not know the current date, so she cannot turn "tomorrow
 at nine" into a timestamp. Options: (a) put the date in the instructions at session start (cheap,
 but frozen for the whole session), (b) a tiny `current_time` tool, (c) parse natural language in
 the tool with `dateparser` (a new dependency). Recommendation: (b).
@@ -343,10 +441,11 @@ parameter names against Open-Meteo's docs first**). Map WMO weather codes to the
 values `WeatherCard` understands, and `is_day` to `isNight`. Cache the last good reading in
 `localStorage`, refresh every 15 minutes, and pause while hidden. `WeatherCard` already shows
 "N m ago" for stale data. Location: the reference shows Hyderabad, India (17.385, 78.4867) —
-default to that and ask the user whether it should be configurable.
+default to that. **Resolved: user requested an editable location control.**
 *Done:* real numbers, and a stale card rather than an empty one when offline.
 
-**C8. Leftovers from A and B.** The quick-action prompts in `lib/nav.ts` are placeholders
+**C8. Leftovers from A and B.** **Resolved: user chose one focused question, then help.**
+The original quick-action prompts in `lib/nav.ts` were placeholders
 ("Search the web for me.") — refine them with the user. The paperclip button is disabled until a
 file-handoff design exists. The user's name and tier come from `MOCK_USER` until a Settings page
 exists. The README has no dashboard section yet — add one (how to run, what's mocked).
@@ -403,9 +502,11 @@ of C), Automation (the `src/workflows.py` library), System Control, Apps (a grid
 - **Animation:** per frame, animate only `transform` and `opacity`; rotate HTML layers, not SVG
   groups; stop loops while the window is hidden; honour `prefers-reduced-motion`.
 - **Visual changes:** compare against `reference-dashboard.webp`, and refresh
-  `current-home-speaking.png` when the look changes meaningfully.
-- **Keep the user in the loop on the open questions:** the date source for tasks (C4), weather
-  location (C7), quick-action prompts (C8), and close-to-tray and packaging (D).
+  `current-home-background.png` when the look changes meaningfully. Preserve the
+  earlier `current-home-speaking.png` as the real-voice verification capture.
+- **C questions are answered:** current-time tool (C4), editable Hyderabad-default
+  weather (C7), one focused quick-action question (C8). Do not ask again.
+  Close-to-tray and packaging decisions remain open for D.
 
 ---
 

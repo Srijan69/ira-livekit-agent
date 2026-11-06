@@ -6,7 +6,7 @@ import { WindowControls } from "./WindowControls";
 /**
  * The IRA mark: concentric arcs around a lit core.
  *
- * Drawn rather than imported so it inherits the theme's cyan and stays sharp
+ * Drawn rather than imported so it inherits the theme's colors and stays sharp
  * at any scale. Abstract on purpose -- see the note in Greeting about not
  * borrowing a character.
  */
@@ -15,19 +15,19 @@ function Logo() {
     <svg viewBox="0 0 48 48" className="size-11" aria-hidden>
       <defs>
         <radialGradient id="logo-core">
-          <stop offset="0%" stopColor="#CFF8FF" />
-          <stop offset="55%" stopColor="#22D3EE" />
-          <stop offset="100%" stopColor="#2E7BFF" />
+          <stop offset="0%" stopColor="var(--orb-core)" />
+          <stop offset="55%" stopColor="var(--color-cyan)" />
+          <stop offset="100%" stopColor="var(--color-blue)" />
         </radialGradient>
       </defs>
-      <circle cx="24" cy="24" r="21" fill="none" stroke="#2E7BFF" strokeWidth="1" opacity="0.35" />
+      <circle cx="24" cy="24" r="21" fill="none" stroke="var(--color-blue)" strokeWidth="1" opacity="0.35" />
       {/* Four arcs with gaps, matching the segmented ring in the reference. */}
       {[0, 90, 180, 270].map((rotation) => (
         <path
           key={rotation}
           d="M 24 7 A 17 17 0 0 1 41 24"
           fill="none"
-          stroke="#22D3EE"
+          stroke="var(--color-cyan)"
           strokeWidth="2.5"
           strokeLinecap="round"
           opacity="0.9"
@@ -36,7 +36,7 @@ function Logo() {
           strokeDasharray="0.78 0.22"
         />
       ))}
-      <circle cx="24" cy="24" r="10" fill="none" stroke="#22D3EE" strokeWidth="1.5" opacity="0.5" />
+      <circle cx="24" cy="24" r="10" fill="none" stroke="var(--color-cyan)" strokeWidth="1.5" opacity="0.5" />
       <circle cx="24" cy="24" r="6" fill="url(#logo-core)" />
     </svg>
   );
@@ -58,9 +58,9 @@ export function TopBar({
   onToggleMic: () => void;
 }) {
   return (
-    <header className="drag-region relative flex shrink-0 items-start justify-between gap-6 px-6 pt-5 pb-4">
+    <header className="dashboard-topbar drag-region relative flex shrink-0 items-start justify-between gap-6 px-6 pt-5 pb-4">
       <div className="flex items-center gap-7">
-        <div className="flex items-center gap-2.5">
+        <div className="dashboard-brand flex items-center gap-2.5">
           <Logo />
           <div className="leading-none">
             <p className="text-[26px] font-bold tracking-[0.02em] text-text">IRA</p>
@@ -72,7 +72,7 @@ export function TopBar({
 
       {/* Centred independently of the flanking columns, so an unusually long
           greeting can't shove it off-centre. */}
-      <div className="pointer-events-none absolute inset-x-0 top-6 flex justify-center">
+      <div className="dashboard-greeting pointer-events-none absolute inset-x-0 top-6 flex justify-center">
         <Greeting now={now} />
       </div>
 

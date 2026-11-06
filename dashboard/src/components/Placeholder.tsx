@@ -3,7 +3,7 @@ import { motion } from "motion/react";
 import { NAV_ITEMS, type NavId } from "@/lib/nav";
 
 /**
- * The eight pages that don't exist yet.
+ * Destinations that don't have dedicated screens yet.
  *
  * Labelled rather than hidden, and explicit about it. A nav item that silently
  * does nothing when clicked is indistinguishable from a bug; one that says
@@ -27,8 +27,8 @@ export function Placeholder({ id }: { id: NavId }) {
       <div className="text-center">
         <h2 className="text-[17px] font-semibold text-text">{item.label}</h2>
         <p className="mt-1.5 max-w-[320px] text-[12.5px] leading-relaxed text-mute">
-          Not built yet. Home is the only page in this build &mdash; ask IRA for
-          anything on this page out loud in the meantime.
+          This page is coming soon. Ask IRA for what you need out loud or from
+          the command bar on Home.
         </p>
       </div>
     </motion.div>

@@ -1,9 +1,8 @@
 """Local HTTP bridge between the desktop dashboard and LiveKit.
 
 Runs on loopback only, started and supervised by the Electron main process.
-It exists for the things WebRTC is the wrong carrier for: minting a join
-token, and answering "why is nothing working". Conversation itself goes over
-the LiveKit room, not through here.
+It handles join tokens, task records and configuration health. Conversation
+itself goes over the LiveKit room, not through here.
 
 Two design rules this file follows:
 
@@ -22,20 +21,30 @@ and a per-launch secret:
 from __future__ import annotations
 
 import argparse
+import asyncio
+import json
 import logging
 import os
 import secrets
 from dataclasses import dataclass, field
 from datetime import timedelta
+from pathlib import Path
 
 from aiohttp import web
 from dotenv import load_dotenv
 from livekit.api import AccessToken, RoomAgentDispatch, RoomConfiguration, VideoGrants
 
+from personal_memory import PersonalMemoryStore
+from personal_memory_bridge import register_personal_memory_routes
+from skill_bridge import register_skill_routes
+from skill_store import SkillStore
+from tasks import Task, TaskStore
+
 logger = logging.getLogger("bridge")
 
 #: Typed key, so aiohttp can check what we stash on the app.
 CONFIG = web.AppKey("config", "BridgeConfig")
+TASKS = web.AppKey("tasks", TaskStore)
 
 load_dotenv(".env.local")
 
@@ -189,13 +198,108 @@ async def handle_health(request: web.Request) -> web.Response:
     )
 
 
-def create_app(config: BridgeConfig) -> web.Application:
+async def _task_payload(request: web.Request) -> dict:
+    try:
+        payload = await request.json()
+    except (ValueError, UnicodeError) as exc:
+        raise web.HTTPBadRequest(
+            text=json.dumps({"error": "body must be a JSON object"}),
+            content_type="application/json",
+        ) from exc
+    if not isinstance(payload, dict):
+        raise web.HTTPBadRequest(
+            text=json.dumps({"error": "body must be a JSON object"}),
+            content_type="application/json",
+        )
+    return payload
+
+
+def _task_json(task: Task) -> dict:
+    return {
+        "id": str(task.id),
+        "title": task.title,
+        "due_at": task.due_at,
+        "done": task.done,
+        "created_at": task.created_at,
+    }
+
+
+async def handle_tasks_list(request: web.Request) -> web.Response:
+    _require_secret(request)
+    try:
+        limit = int(request.query.get("limit", "8"))
+        tasks = await asyncio.to_thread(request.app[TASKS].upcoming, limit=limit)
+    except ValueError as exc:
+        return web.json_response({"error": str(exc)}, status=400)
+    return web.json_response({"tasks": [_task_json(task) for task in tasks]})
+
+
+async def handle_tasks_create(request: web.Request) -> web.Response:
+    _require_secret(request)
+    payload = await _task_payload(request)
+    try:
+        task = await asyncio.to_thread(
+            request.app[TASKS].add, payload.get("title"), payload.get("due_at")
+        )
+    except ValueError as exc:
+        return web.json_response({"error": str(exc)}, status=400)
+    return web.json_response({"task": _task_json(task)}, status=201)
+
+
+async def handle_tasks_update(request: web.Request) -> web.Response:
+    _require_secret(request)
+    payload = await _task_payload(request)
+    try:
+        task_id = int(request.match_info["id"])
+        task = await asyncio.to_thread(
+            request.app[TASKS].set_done, task_id, payload.get("done")
+        )
+    except ValueError as exc:
+        return web.json_response({"error": str(exc)}, status=400)
+    if task is None:
+        return web.json_response({"error": "task not found"}, status=404)
+    return web.json_response({"task": _task_json(task)})
+
+
+async def handle_tasks_delete(request: web.Request) -> web.Response:
+    _require_secret(request)
+    try:
+        task_id = int(request.match_info["id"])
+        deleted = await asyncio.to_thread(request.app[TASKS].delete, task_id)
+    except ValueError as exc:
+        return web.json_response({"error": str(exc)}, status=400)
+    if not deleted:
+        return web.json_response({"error": "task not found"}, status=404)
+    return web.json_response({"deleted": True})
+
+
+async def _close_tasks(app: web.Application) -> None:
+    await asyncio.to_thread(app[TASKS].close)
+
+
+def create_app(
+    config: BridgeConfig,
+    *,
+    tasks: TaskStore | None = None,
+    skills: SkillStore | None = None,
+    run_path: str | Path | None = None,
+    personal_memory: PersonalMemoryStore | None = None,
+) -> web.Application:
+    """Build the bridge; the app closes its injected or default store on cleanup."""
     app = web.Application()
     app[CONFIG] = config
+    app[TASKS] = tasks if tasks is not None else TaskStore()
+    app.on_cleanup.append(_close_tasks)
+    register_skill_routes(app, _require_secret, skills=skills, run_path=run_path)
+    register_personal_memory_routes(app, _require_secret, store=personal_memory)
     app.add_routes(
         [
             web.post("/token", handle_token),
             web.get("/health", handle_health),
+            web.get("/tasks", handle_tasks_list),
+            web.post("/tasks", handle_tasks_create),
+            web.patch("/tasks/{id}", handle_tasks_update),
+            web.delete("/tasks/{id}", handle_tasks_delete),
         ]
     )
     return app

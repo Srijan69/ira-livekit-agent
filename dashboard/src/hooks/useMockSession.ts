@@ -2,6 +2,8 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import type { Session } from "@/lib/session";
 import { activeCuesFrom, orbStateFrom } from "@/lib/orbState";
+const noEvents: Session["subscribeEvents"] = () => () => {};
+const noHistory = () => {};
 
 /**
  * A scripted session, for working on the UI without a voice connection.
@@ -104,6 +106,9 @@ export function useMockSession(): Session {
   }, []);
 
   return {
+    activities: [],
+    clearExecutionHistory: noHistory,
+    subscribeEvents: noEvents,
     // Never an error: this session is scripted, so there is nothing to
     // fail. The real hook is where connection problems surface.
     error: null,

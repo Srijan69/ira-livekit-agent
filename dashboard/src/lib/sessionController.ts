@@ -1,14 +1,16 @@
-import { ConnectionState, ParticipantKind, RoomEvent } from "livekit-client";
+import { ConnectionState, DataPacket_Kind, ParticipantKind, RoomEvent } from "livekit-client";
 
 import type {
   HealthResult,
   ProcessSnapshot,
   ProcessStatus,
   TokenResult,
+  IraEvent,
 } from "@shared/types";
 
 import type { AgentLifecycle } from "./orbState";
 import { EMPTY_TRACKER, trackStatus, type StatusTracker } from "./statusTracker";
+import { clearFinishedExecution, expireExecution, interruptExecution, trackExecution, type ExecutionActivity, type ExecutionEvent } from "./execution";
 
 /**
  * Owns the connection between the dashboard and IRA.
@@ -31,6 +33,7 @@ import { EMPTY_TRACKER, trackStatus, type StatusTracker } from "./statusTracker"
 export const AGENT_STATE_ATTRIBUTE = "lk.agent.state";
 /** Must match STATUS_TOPIC in src/agent.py. */
 export const STATUS_TOPIC = "ira.status";
+export const EVENTS_TOPIC = "ira.events";
 /** The Agents SDK's chat topic. Its handler turns text into a user turn. */
 export const CHAT_TOPIC = "lk.chat";
 
@@ -99,6 +102,7 @@ export type SessionSnapshot = {
   agentState: AgentLifecycle | undefined;
   userSpeaking: boolean;
   tracker: StatusTracker;
+  activities: ExecutionActivity[];
   micEnabled: boolean;
   error: string | null;
 };
@@ -109,12 +113,14 @@ export const INITIAL_SNAPSHOT: SessionSnapshot = {
   agentState: undefined,
   userSpeaking: false,
   tracker: EMPTY_TRACKER,
+  activities: [],
   micEnabled: false,
   error: null,
 };
 
 type Timer = ReturnType<typeof setTimeout>;
 type Handler = (...args: never[]) => void;
+const STATUS_STATES = new Set(["DELEGATING", "RUNNING", "VERIFYING", "DONE", "ERROR", "CANCELLED", "LISTENING", "RECOGNIZING", "GENERATING", "SPEAKING"]);
 
 /** The agent participant, if she has joined. */
 export function findAgent(room: RoomLike): ParticipantLike | undefined {
@@ -143,6 +149,7 @@ function toConnection(state: ConnectionState): SessionSnapshot["connection"] {
 export class SessionController {
   private state: SessionSnapshot = INITIAL_SNAPSHOT;
   private readonly listeners = new Set<(snapshot: SessionSnapshot) => void>();
+  private readonly eventListeners = new Set<(event: IraEvent) => void>();
 
   private room: RoomLike | null = null;
   private handlers: Array<[string, Handler]> = [];
@@ -150,6 +157,7 @@ export class SessionController {
   private disposed = false;
 
   private supervised = true;
+  private configurationRequired = false;
   private agentProcess: ProcessStatus | null = null;
   private readyTimedOut = false;
   private heardAgent = false;
@@ -160,6 +168,7 @@ export class SessionController {
   private speakTimer: Timer | null = null;
   private rejoinTimer: Timer | null = null;
   private unsubscribeProcess: (() => void) | null = null;
+  private activityTimer: Timer | null = null;
 
   constructor(private readonly options: ControllerOptions) {}
 
@@ -172,6 +181,11 @@ export class SessionController {
   subscribe(listener: (snapshot: SessionSnapshot) => void): () => void {
     this.listeners.add(listener);
     return () => this.listeners.delete(listener);
+  }
+
+  subscribeEvents(listener: (event: IraEvent) => void): () => void {
+    this.eventListeners.add(listener);
+    return () => { this.eventListeners.delete(listener); };
   }
 
   /**
@@ -204,7 +218,16 @@ export class SessionController {
     if (this.disposed) return;
 
     this.supervised = processes.supervised;
+    this.configurationRequired = processes.configurationRequired === true;
     if (processes.agent) this.applyProcess(processes.agent, false);
+
+    if (this.configurationRequired) {
+      this.set({
+        connection: "disconnected",
+        error: "Open Settings > Connection and Keys to save your Google and LiveKit credentials and connect IRA.",
+      });
+      return;
+    }
 
     if (this.agentProcess?.state !== "failed") this.set({ connection: "connecting" });
 
@@ -224,6 +247,10 @@ export class SessionController {
     void room.localParticipant.sendText(text, { topic: CHAT_TOPIC }).catch(() => {
       this.set({ error: "Couldn't send that to IRA. Try again." });
     });
+  }
+
+  clearExecutionHistory(): void {
+    this.set({ activities: clearFinishedExecution(this.state.activities) });
   }
 
   setMicrophone(enabled: boolean): void {
@@ -249,6 +276,7 @@ export class SessionController {
 
     this.leaveRoom();
     this.listeners.clear();
+    this.eventListeners.clear();
   }
 
   // -- process supervision --------------------------------------------------
@@ -276,7 +304,7 @@ export class SessionController {
   }
 
   private evaluate(): void {
-    if (this.disposed || this.room || this.connecting) return;
+    if (this.disposed || this.configurationRequired || this.room || this.connecting) return;
     if (this.supervised && this.agentProcess?.state === "failed") return;
     if (!this.agentReady() && !this.readyTimedOut) return;
     void this.connect();
@@ -306,7 +334,7 @@ export class SessionController {
             connection: "disconnected",
             error: `Not configured: ${missing.join(", ")}. Add ${
               missing.length === 1 ? "it" : "them"
-            } to .env.local and restart IRA.`,
+            } in Settings > Connection and Keys and save to reconnect IRA.`,
           });
           return;
         }
@@ -387,6 +415,7 @@ export class SessionController {
 
   private leaveRoom(): void {
     this.clearWatchdogs();
+    this.interruptActivities();
     const room = this.room;
     this.room = null;
     if (!room) return;
@@ -409,7 +438,10 @@ export class SessionController {
       [
         RoomEvent.ConnectionStateChanged,
         ((state: ConnectionState) => {
-          if (this.room === room) this.set({ connection: toConnection(state) });
+          if (this.room === room) {
+            if (state !== ConnectionState.Connected) this.interruptActivities("unavailable");
+            this.set({ connection: toConnection(state) });
+          }
         }) as Handler,
       ],
       [RoomEvent.ParticipantConnected, sync],
@@ -425,22 +457,48 @@ export class SessionController {
       ],
       [
         RoomEvent.DataReceived,
-        ((payload: Uint8Array, _who?: unknown, _kind?: unknown, topic?: string) => {
-          if (topic !== STATUS_TOPIC || !mine()) return;
+        ((payload: Uint8Array, who?: ParticipantLike, kind?: DataPacket_Kind, topic?: string) => {
+          if (topic === EVENTS_TOPIC) {
+            // Agent state attributes are writable by ordinary participants.
+            // The server-assigned kind and membership establish the sender.
+            if (!mine() || this.disposed || kind !== DataPacket_Kind.RELIABLE || !who || who.kind !== ParticipantKind.AGENT || room.remoteParticipants.get(who.identity) !== who || payload.byteLength > 1024) return;
+            try {
+              const event: unknown = JSON.parse(new TextDecoder().decode(payload));
+              if (!event || typeof event !== "object" || Array.isArray(event) || Object.keys(event).length !== 1 || !("type" in event) || (event.type !== "tasks.changed" && event.type !== "skills.changed")) return;
+              for (const listener of this.eventListeners) listener({ type: event.type });
+            } catch { /* Invalid data never triggers a bridge request. */ }
+            return;
+          }
+          if (topic !== STATUS_TOPIC || !mine() || this.disposed || kind !== DataPacket_Kind.RELIABLE || !who || who.kind !== ParticipantKind.AGENT || room.remoteParticipants.get(who.identity) !== who || payload.byteLength > 4096) return;
           try {
-            const event = JSON.parse(new TextDecoder().decode(payload)) as {
-              state?: unknown;
-              detail?: unknown;
-            };
-            this.set({
-              tracker: trackStatus(this.state.tracker, {
-                state: String(event.state ?? ""),
-                detail: event.detail ? String(event.detail) : undefined,
-                // Stamped on arrival. The agent's clock and ours need not
-                // agree, and the orb's freshness windows compare against ours.
-                at: (this.options.now ?? Date.now)(),
-              }),
-            });
+            const value: unknown = JSON.parse(new TextDecoder().decode(payload));
+            if (!value || typeof value !== "object" || Array.isArray(value)) return;
+            const event = value as Record<string, unknown>;
+            if (typeof event.state !== "string" || !STATUS_STATES.has(event.state) || (event.detail !== undefined && (typeof event.detail !== "string" || event.detail.length > 1024))) return;
+            const at = (this.options.now ?? Date.now)();
+            const detail = event.detail as string | undefined;
+            const hasMetadata = ["call_id", "tool_name", "source"].some((field) => field in event);
+            if (hasMetadata) {
+              if (![event.run_id, event.call_id, event.tool_name].every((field) => typeof field === "string" && field.length > 0 && field.length <= 128) || (event.source !== "lifecycle" && event.source !== "tool" && event.source !== "skill")) return;
+              if (["skill_run_id", "skill_slug", "outcome"].some((key) => event[key] !== undefined && (typeof event[key] !== "string" || !event[key] || (event[key] as string).length > 128))) return;
+              if (["skill_version", "step_index", "step_count"].some((key) => event[key] !== undefined && (typeof event[key] !== "number" || !Number.isInteger(event[key]) || (event[key] as number) < 0 || (event[key] as number) > 1_000_000))) return;
+              if (event.step_tool !== undefined && (typeof event.step_tool !== "string" || !event.step_tool.trim() || event.step_tool.length > 128)) return;
+              if (event.step_outcome !== undefined && (typeof event.step_outcome !== "string" || !["running", "verifying", "waiting", "done", "error", "cancelled", "uncertain"].includes(event.step_outcome))) return;
+              if ((event.step_index !== undefined || event.step_count !== undefined)
+                && (typeof event.step_index !== "number" || typeof event.step_count !== "number" || event.step_index > event.step_count || event.step_count > 10_000)) return;
+              const activities = trackExecution(this.state.activities, { ...event, at } as ExecutionEvent);
+              // Only correlated execution drives tool state. Internal updates
+              // must not duplicate calls or finish a different active action.
+              if (activities === this.state.activities) return;
+              const tracker = this.activityTracker(activities, event.state === "ERROR" ? at : this.state.tracker.errorAt);
+              this.set({ activities, tracker });
+              this.armActivityExpiry();
+            } else if (this.state.activities.some((item) => item.phase === "running" || item.phase === "verifying")) {
+              // Older/manual uncorrelated statuses cannot erase live calls.
+              return;
+            } else {
+              this.set({ tracker: trackStatus(this.state.tracker, { state: event.state, detail, at }) });
+            }
           } catch {
             // A malformed status message is not worth a broken orb.
           }
@@ -510,6 +568,7 @@ export class SessionController {
     }
 
     if (!present && wasPresent) {
+      this.interruptActivities();
       // She left. Give her a moment -- a brief network blip looks the same --
       // then move to a fresh room if her worker is still up. A worker that
       // re-registers is handled sooner, in applyProcess.
@@ -560,6 +619,29 @@ export class SessionController {
   }
 
   // -- plumbing -------------------------------------------------------------
+
+  private activityTracker(activities: ExecutionActivity[], errorAt = this.state.tracker.errorAt): StatusTracker {
+    const active = activities.find((item) => item.phase === "running" || item.phase === "verifying");
+    return { tool: active ? { name: active.toolName, lastUpdate: active.updatedAt } : null, errorAt };
+  }
+
+  private interruptActivities(phase: "cancelled" | "unavailable" = "cancelled"): void {
+    if (this.activityTimer) { clearTimeout(this.activityTimer); this.timers.delete(this.activityTimer); this.activityTimer = null; }
+    this.set({ activities: interruptExecution(this.state.activities, (this.options.now ?? Date.now)(), phase), tracker: EMPTY_TRACKER });
+  }
+
+  private armActivityExpiry(): void {
+    if (this.activityTimer) { clearTimeout(this.activityTimer); this.timers.delete(this.activityTimer); this.activityTimer = null; }
+    const active = this.state.activities.filter((item) => item.phase === "running" || item.phase === "verifying");
+    if (active.length === 0) return;
+    const deadline = Math.min(...active.map((item) => item.updatedAt + 30_000));
+    this.activityTimer = this.later(Math.max(0, deadline - (this.options.now ?? Date.now)()), () => {
+      this.activityTimer = null;
+      const activities = expireExecution(this.state.activities, (this.options.now ?? Date.now)());
+      this.set({ activities, tracker: this.activityTracker(activities) });
+      this.armActivityExpiry();
+    });
+  }
 
   private later(ms: number, fn: () => void): Timer {
     const timer = setTimeout(() => {

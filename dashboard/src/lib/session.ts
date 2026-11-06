@@ -1,5 +1,7 @@
 import type { ConnectionState } from "@/components/ConnectionBadge";
 import type { Cue, OrbState } from "@/lib/orbState";
+import type { IraEvent } from "@shared/types";
+import type { ExecutionActivity } from "./execution";
 
 /**
  * The seam between the UI and IRA.
@@ -11,6 +13,9 @@ import type { Cue, OrbState } from "@/lib/orbState";
  * swapping the mock for the real thing a one-import change.
  */
 export type Session = {
+  activities: ExecutionActivity[];
+  clearExecutionHistory: () => void;
+  subscribeEvents: (listener: (event: IraEvent) => void) => () => void;
   connection: ConnectionState;
   orbState: OrbState;
   cues: Cue[];

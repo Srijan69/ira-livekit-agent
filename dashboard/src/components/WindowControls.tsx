@@ -27,7 +27,7 @@ export function WindowControls({
         className="panel grid size-9 place-items-center rounded-full text-text transition-colors hover:bg-white/10"
         style={
           micEnabled
-            ? { borderColor: "rgb(34 211 238 / 0.35)", color: "#22D3EE" }
+            ? { borderColor: "rgb(var(--accent-rgb) / 0.35)", color: "var(--color-cyan)" }
             : undefined
         }
       >

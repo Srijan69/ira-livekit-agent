@@ -46,3 +46,45 @@ dashboard/shots/
 
 # GitHub CLI
 .github/personal-instructions.md
+
+# Local skill versions, execution evidence and desktop ownership.
+workflows/.skills.sqlite3*
+workflows/.runs.sqlite3*
+workflows/.host.lock
+workflows/.archive/
+workflows/.curator_state*
+workflows/.tool_mastery*
+.pytest-baseline.txt
+.pytest-integration.txt
+
+# Local profile and conversation archive, including SQLite WAL files.
+memories/personal.sqlite3*
+
+# Private runtime state and local agent coordination.
+memories/
+.omm/
+.agents/teamwork/
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+*.sqlite3
+*.sqlite3-wal
+*.sqlite3-shm
+skills/.host.lock
+skills/.archive/
+skills/.curator_state*
+skills/.tool_mastery*
+
+# Generated download and visual QA outputs (runtime theme assets remain tracked).
+Optimized_Assets/
+artifacts/
+dashboard/execution-*.png
+dashboard/execution-*.jpg
+docs/handoff/current-home-*.png
+docs/handoff/orb-comparison.png
+
+# One-off local contact automation, not part of IRA's runtime.
+scripts/send_whatsapp.py

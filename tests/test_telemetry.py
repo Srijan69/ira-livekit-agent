@@ -1,3 +1,5 @@
+from types import SimpleNamespace
+
 from telemetry import SessionStatusReporter
 
 
@@ -102,3 +104,100 @@ class TestStructuredObserver:
         reporter.emit("running", "step")
 
         assert events[0]["state"] == "RUNNING"
+
+
+def test_tool_reporters_keep_interleaved_calls_separate() -> None:
+    events: list[dict] = []
+    reporter = SessionStatusReporter(
+        run_id="session-1", sink=lambda _: None, observer=events.append
+    )
+    first = reporter.for_tool(
+        SimpleNamespace(
+            function_call=SimpleNamespace(call_id="call-a", name="open_app")
+        )
+    )
+    second = reporter.for_tool(
+        SimpleNamespace(
+            function_call=SimpleNamespace(call_id="call-b", name="read_page")
+        )
+    )
+
+    first.emit("RUNNING", "desktop worker")
+    second.emit("RUNNING", "browser worker")
+    first.emit("DONE", "open_app")
+    reporter.emit("LISTENING")
+
+    assert [
+        (e.get("call_id"), e.get("tool_name"), e.get("source")) for e in events
+    ] == [
+        ("call-a", "open_app", "tool"),
+        ("call-b", "read_page", "tool"),
+        ("call-a", "open_app", "tool"),
+        (None, None, None),
+    ]
+    assert all(event["run_id"] == "session-1" for event in events)
+
+
+def test_worker_child_keeps_enclosing_tool_metadata() -> None:
+    events: list[dict] = []
+    reporter = SessionStatusReporter(sink=lambda _: None, observer=events.append)
+    bound = reporter.for_tool(
+        SimpleNamespace(
+            function_call=SimpleNamespace(call_id="workflow-1", name="run_workflow")
+        )
+    )
+
+    bound.child_run("lightweight").emit("VERIFYING", "step 1/3")
+
+    assert events[0]["label"] == "lightweight"
+    assert events[0]["call_id"] == "workflow-1"
+    assert events[0]["tool_name"] == "run_workflow"
+    assert events[0]["source"] == "tool"
+
+
+def test_standalone_tool_reporting_does_not_invent_call_metadata() -> None:
+    events: list[dict] = []
+    reporter = SessionStatusReporter(sink=lambda _: None, observer=events.append)
+
+    reporter.for_tool(None).emit("RUNNING", "open_app")
+
+    assert events[0]["state"] == "RUNNING"
+    assert not {"call_id", "tool_name", "source"}.intersection(events[0])
+
+
+def test_skill_progress_retains_session_call_and_zero_step() -> None:
+    events: list[dict] = []
+    reporter = SessionStatusReporter(
+        run_id="session-1", sink=lambda _: None, observer=events.append
+    ).for_tool(
+        SimpleNamespace(
+            function_call=SimpleNamespace(call_id="call-a", name="run_skill")
+        )
+    )
+    reporter.child_run("skill").emit(
+        "ERROR",
+        source="skill",
+        skill_run_id="skill-1",
+        skill_slug="open-notes",
+        skill_version=2,
+        step_index=0,
+        step_count=3,
+        outcome="uncertain",
+    )
+    assert events[0] | {"at": 0} == {
+        "run_id": "session-1",
+        "call_id": "call-a",
+        "tool_name": "run_skill",
+        "label": "skill",
+        "state": "ERROR",
+        "detail": "",
+        "at": 0,
+        "source": "skill",
+        "skill_run_id": "skill-1",
+        "skill_slug": "open-notes",
+        "skill_version": 2,
+        "step_index": 0,
+        "step_count": 3,
+        "outcome": "uncertain",
+    }
+    assert events[0]["at"] > 1_000_000_000_000
