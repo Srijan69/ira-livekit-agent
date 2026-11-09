@@ -18,6 +18,8 @@ On clean unchanged `main`, the repair regression suite produced eight failures a
 
 The final clean-branch run passed **433 tests with four opt-in live-provider tests skipped**, zero failures, and zero errors across 16 selected suites in 24.48 seconds. Repository-wide Ruff lint and formatting checks passed. The formatter also normalized existing Python examples in the profile/memory implementation plan so the repository's CI formatting gate passes.
 
+GitHub's Ruff workflow also passed. Its leftover starter-template check rejected the already-tracked `uv.lock`; that template-only workflow is removed because IRA is a configured application with committed dependency versions. The lint and simulation workflows remain.
+
 Review found and reproduced two additional ambiguous clock alternatives, including “tomorrow at 16:30 or 17:00.” Both now raise before deadline construction. The Windows-catalogue fixtures explicitly provide the platform-specific constant; all 13 launcher tests also passed with that constant initially absent from the simulated host.
 
 The earlier evaluated-working-tree run passed 441 tests and skipped four live-provider tests. This clean branch excludes ten checks for unrelated uncommitted continuation/context features and adds two ambiguity regressions, so the counts are different.
