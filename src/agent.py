@@ -8,7 +8,6 @@ import re
 import tempfile
 import textwrap
 import threading
-import time
 import warnings
 from dataclasses import asdict
 from datetime import datetime, timezone
@@ -45,7 +44,11 @@ from personal_memory import PersonalMemoryStore
 from realtime_model import GEMINI_LIVE_MODEL as GEMINI_LIVE_MODEL
 from realtime_model import build_realtime_model
 from request_scope import RequestScope
-from request_scope_livekit import RequestScopeTools, check_current_action
+from request_scope_livekit import (
+    RequestScopeTools,
+    check_current_action,
+    current_request,
+)
 from session_memory import SessionMemoryIntegration
 from skill_adapters import validate_app
 from skill_store import SkillStore
@@ -150,12 +153,6 @@ MAX_APP_NAME_LENGTH = 64
 # can lazily import anyio, which otherwise blocks the audio loop at startup.
 PREWARM_IMPORTS = ("h11", "httpcore", "httpx", "anyio")
 
-# Waits around the Start menu. Pressing Win and typing immediately loses the
-# first characters, and pressing Enter before the search results settle opens
-# whatever was highlighted before -- occasionally the wrong app.
-_START_MENU_OPEN_DELAY = 0.6
-_SEARCH_RESULTS_DELAY = 0.9
-
 
 def _sanitize_app_name(app_name: str) -> str:
     """Reduce a spoken app name to something safe to type into the Start menu.
@@ -172,27 +169,11 @@ def _sanitize_app_name(app_name: str) -> str:
     return collapsed[:MAX_APP_NAME_LENGTH]
 
 
-def _launch_via_start_menu(app_name: str) -> None:
-    """Type `app_name` into the Windows Start menu and press Enter.
+def _launch_via_start_menu(app_name: str):
+    """Legacy entrypoint: launch an exact registered app without typing a search."""
+    from app_launcher import launch_installed_app
 
-    Synchronous and slow by nature (roughly 1.5s of deliberate waiting), so
-    callers must push it off the event loop -- see `open_app`.
-
-    `pyautogui` is imported here rather than at module scope on purpose: the
-    import itself fails on a host with no display, and this file is also
-    deployed to LiveKit Cloud by the Dockerfile. A top-level import would take
-    the whole agent down there instead of just this one tool.
-    """
-    import pyautogui
-
-    check_current_action()
-    pyautogui.press("win")
-    time.sleep(_START_MENU_OPEN_DELAY)
-    check_current_action()
-    pyautogui.write(app_name, interval=0.02)
-    time.sleep(_SEARCH_RESULTS_DELAY)
-    check_current_action()
-    pyautogui.press("enter")
+    return launch_installed_app(app_name)
 
 
 def _prewarm(proc: JobProcess) -> None:
@@ -723,13 +704,30 @@ class Assistant(SkillTools, Agent):
         task, not an alarm or a scheduled notification.
         """
         try:
-            await asyncio.to_thread(self._tasks.add, title, due_at)
+            request = current_request()
+            now = self._clock()
+            if request is not None:
+                from task_deadlines import resolve_task_deadline
+
+                text = " ".join((request.text, *request.answers))
+                due_at = resolve_task_deadline(text, due_at, now)
+            task = await asyncio.to_thread(self._tasks.add, title, due_at)
         except ValueError as exc:
             return f"Task not added: {exc}."
         except Exception:
             logger.exception("could not add task")
             return "That task did not save, boss."
         self._tasks_changed()
+        if task.due_at:
+            due = datetime.fromisoformat(task.due_at.replace("Z", "+00:00"))
+            local = due.astimezone(now.tzinfo or timezone.utc)
+            return json.dumps(
+                {
+                    "ok": True,
+                    "task": asdict(task),
+                    "due_at_local": local.isoformat(timespec="seconds"),
+                }
+            )
         return "Added, boss."
 
     @function_tool
@@ -791,16 +789,12 @@ class Assistant(SkillTools, Agent):
         except ValueError as exc:
             raise ToolError(str(exc)) from exc
 
-        logger.info("opening app via Start menu", extra={"app_name": name})
+        logger.info("launching registered app", extra={"app_name": name})
         reporter = self._reporter.for_tool(context)
         reporter.emit("DELEGATING", "desktop worker")
         reporter.emit("RUNNING", "open_app")
         try:
-            # PyAutoGUI is synchronous and this sequence deliberately waits
-            # ~1.5s. Run inline it would block the event loop carrying audio,
-            # and IRA's speech would audibly stutter mid-sentence.
-            await self._run_host_action(_launch_via_start_menu, name)
-            self._record_tool_success("open_app")
+            selected = await self._run_host_action(_launch_via_start_menu, name)
         except HostActionTimeout:
             reporter.emit("ERROR", "open_app timed out")
             raise
@@ -828,15 +822,20 @@ class Assistant(SkillTools, Agent):
             self._record_tool_failure("open_app", str(exc))
             raise ToolError(f"Could not open {name}: {exc}") from exc
 
-        # Deliberately not "opened": pressing Enter at the Start menu is not
-        # proof the app launched, and IRA should not claim more than she
-        # actually knows.
-        reporter.emit("DONE", "open_app")
-        return (
-            f"Asked Windows to open {name}. Tell the boss it is opening. "
-            f"If the boss requested an action inside {name} (such as playing music, "
-            f"browsing, or typing), proceed with the next tool call now to complete the objective "
-            f"before finalizing your reply."
+        reporter.emit("DONE", "launch requested; verification pending")
+        return json.dumps(
+            {
+                "status": "uncertain",
+                "verified": False,
+                "app_name": selected.name,
+                "app_id": selected.app_id,
+                "instruction": (
+                    "Launch requested, not verified. Do not claim the app opened. "
+                    "Capture fresh screen/window evidence and verify this exact app. "
+                    "A browser search is not this application. Continue only the "
+                    "remaining steps of the original task; do not repeat the launch."
+                ),
+            }
         )
 
     def _require_desktop_activity(self, context, *, require_observed=False):

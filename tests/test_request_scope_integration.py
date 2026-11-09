@@ -2,7 +2,6 @@
 
 import asyncio
 import json
-import sys
 from contextlib import contextmanager
 from types import SimpleNamespace
 
@@ -127,42 +126,44 @@ async def test_exported_skill_admission_does_not_authorize_unrelated_step(tmp_pa
     assert effects == []
 
 
-@pytest.mark.parametrize("wait_number", [1, 2])
+@pytest.mark.parametrize("stage", ["catalogue", "selection"])
 @pytest.mark.parametrize("interruption", ["stop", "new_request"])
 async def test_app_launch_stops_between_native_steps(
-    tmp_path, monkeypatch, wait_number, interruption
+    tmp_path, monkeypatch, stage, interruption
 ):
+    import app_launcher
+
     async def judge(*_):
         return AdmissionDecision("allow", "Requested launch")
 
     effects = []
-    monkeypatch.setitem(
-        sys.modules,
-        "pyautogui",
-        SimpleNamespace(
-            press=lambda key: effects.append(("press", key)),
-            write=lambda text, **_: effects.append(("write", text)),
-        ),
-    )
     scope = RequestScope(judge)
-    waits = 0
 
-    def interrupt_during_wait(_):
-        nonlocal waits
-        waits += 1
-        if waits == wait_number:
-            if interruption == "stop":
-                scope.stop()
-            else:
-                scope.begin_request("Inspect only", source_id="human-2")
+    def interrupt():
+        if interruption == "stop":
+            scope.stop()
+        else:
+            scope.begin_request("Inspect only", source_id="human-2")
 
-    monkeypatch.setattr("agent.time.sleep", interrupt_during_wait)
+    def catalogue():
+        if stage == "catalogue":
+            interrupt()
+        return [app_launcher.InstalledApp("Google Chrome", "Chrome")]
+
+    original_select = app_launcher.select_installed_app
+
+    def select(name, apps):
+        result = original_select(name, apps)
+        if stage == "selection":
+            interrupt()
+        return result
+
+    monkeypatch.setattr(app_launcher, "_read_start_apps", catalogue)
+    monkeypatch.setattr(app_launcher, "select_installed_app", select)
+    monkeypatch.setattr(app_launcher, "_start_app", effects.append)
     assistant = Assistant(skills=SkillStore(tmp_path), request_scope=scope)
     context = SimpleNamespace()
     bind(assistant, context, "Open Chrome")
     with pytest.raises(ToolError):
         await exported(assistant, "open_app")(context, "Chrome")
-    expected = [("press", "win")]
-    if wait_number == 2:
-        expected.append(("write", "Chrome"))
-    assert effects == expected
+    assert effects == []

@@ -117,7 +117,7 @@ class RequestScope:
     ):
         if min(max_actions, request_ttl, policy_timeout, history_limit) <= 0:
             raise ValueError("Scope limits must be positive")
-        self.judge = judge
+        self.judge = GeminiScopeJudge() if judge is None else judge
         self.max_actions = max_actions
         self.request_ttl = request_ttl
         self.policy_timeout = policy_timeout
@@ -302,10 +302,6 @@ class RequestScope:
         )
 
     async def _assess(self, request_id, proposal):
-        if self.judge is None or (
-            isinstance(self.judge, GeminiScopeJudge) and self.judge._client is None
-        ):
-            return self.require(request_id)
         with self._lock:
             request = self.require(request_id)
             history = self.history
@@ -604,12 +600,18 @@ class GeminiScopeJudge:
         ).strip() or "gemini-3.5-flash-lite"
 
     async def __call__(self, request, action, history):
+        from google import genai
         from google.genai import types
 
         if self._client is None:
-            return AdmissionDecision(
-                "allow", "Judgmental system removed; direct execution allowed"
-            )
+            key = os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY")
+            if not key:
+                return _heuristic_policy_fallback(request, action)
+            try:
+                self._client = genai.Client(api_key=key)
+            except Exception as exc:
+                logger.warning("Scope client unavailable type=%s", type(exc).__name__)
+                return _heuristic_policy_fallback(request, action)
         observation = dict(action.observation)
         image_bytes = observation.pop("image_bytes", None)
         image_mime = observation.pop("image_mime_type", "image/jpeg")

@@ -2,7 +2,6 @@
 
 import asyncio
 import json
-import sys
 from pathlib import Path
 from threading import Event
 from types import SimpleNamespace
@@ -279,16 +278,15 @@ async def test_optimizer_real_desktop_uses_guarded_launcher(
         assert assistant._execution_lock.locked()
         inputs.append((kind, value))
 
-    monkeypatch.setitem(
-        sys.modules,
-        "pyautogui",
-        SimpleNamespace(
-            press=lambda key: record("press", key),
-            write=lambda text, **kwargs: record("write", text),
-        ),
+    from app_launcher import InstalledApp
+
+    monkeypatch.setattr(
+        "app_launcher._read_start_apps",
+        lambda: [InstalledApp("Paint", "Paint.Test!App")],
     )
-    monkeypatch.setattr("agent._START_MENU_OPEN_DELAY", 0)
-    monkeypatch.setattr("agent._SEARCH_RESULTS_DELAY", 0)
+    monkeypatch.setattr(
+        "app_launcher._start_app", lambda app: record("launch", app.app_id)
+    )
     monkeypatch.setattr(
         "agent.image_pipeline.scrape_image_urls",
         lambda **kwargs: ["https://example.com/inert.jpg"],
@@ -325,7 +323,7 @@ async def test_optimizer_real_desktop_uses_guarded_launcher(
     else:
         result = await tool(context, count=1, output_dir=str(tmp_path / "output"))
         assert "Downloaded and resized 1 images" in result
-        assert inputs == [("press", "win"), ("write", "MS Paint"), ("press", "enter")]
+        assert inputs == [("launch", "Paint.Test!App")]
         with Image.open(tmp_path / "output" / "city_01.jpg") as output:
             assert output.size == (1080, 1080)
     assert not assistant._execution_lock.locked()

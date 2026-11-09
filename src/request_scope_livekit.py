@@ -38,6 +38,44 @@ _action = contextvars.ContextVar("ira_action_permit", default=None)
 _outer_actions = contextvars.ContextVar("ira_outer_action_permits", default=())
 
 
+def current_request():
+    """Return only the trusted request bound to this executing tool."""
+    binding = _binding.get()
+    if binding is None:
+        return None
+    check_current_action()
+    return binding.scope.require(binding.request.id)
+
+
+def _result_outcome(result):
+    if getattr(result, "ok", None) is True:
+        return "done"
+    if getattr(result, "ok", None) is False:
+        return "error"
+    value = result
+    if isinstance(value, str) and value.lstrip().startswith("{"):
+        try:
+            value = json.loads(value)
+        except (ValueError, TypeError):
+            return "returned"
+    if isinstance(value, dict):
+        status = value.get("status")
+        if isinstance(status, str) and status in {"uncertain", "not_started"}:
+            return status
+        if isinstance(status, str) and status in {
+            "error",
+            "failed",
+            "timeout",
+            "cancelled",
+        }:
+            return "error"
+        if value.get("ok") is False:
+            return "error"
+        if value.get("ok") is True:
+            return "done"
+    return "returned"
+
+
 def check_current_action():
     """No-op for internal primitives; guarded exported effects must remain live."""
     for scope, permit, speech in _outer_actions.get():
@@ -344,9 +382,7 @@ class RequestScopeTools:
             self.scope.record(permit, outcome, type(exc).__name__)
             raise
         else:
-            outcome = "done" if getattr(result, "ok", None) is True else "returned"
-            if getattr(result, "ok", None) is False:
-                outcome = "error"
+            outcome = _result_outcome(result)
             self.scope.record(permit, outcome, str(result))
             return result
         finally:
