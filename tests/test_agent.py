@@ -19,7 +19,7 @@ import asyncio
 import json
 import os
 import sys
-from unittest.mock import MagicMock, call, patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 from google.genai import types as genai_types
@@ -345,79 +345,75 @@ def test_sanitize_rejects_an_empty_name() -> None:
 def fake_pyautogui():
     """Stands in for the real module, which needs a desktop to import.
 
-    _launch_via_start_menu imports pyautogui lazily, so replacing the
-    sys.modules entry is enough -- and it means these tests never actually
-    press keys.
+    DesktopController imports pyautogui lazily, so replacing the sys.modules
+    entry keeps desktop-input tests away from the real keyboard and mouse.
     """
     fake = MagicMock()
     with patch.dict(sys.modules, {"pyautogui": fake}):
         yield fake
 
 
-def test_launch_presses_win_types_the_name_then_enter(fake_pyautogui) -> None:
-    """Order matters: the name must land after the Start menu has focus."""
-    with patch("agent.time.sleep"):
-        _launch_via_start_menu("Spotify")
+@pytest.fixture
+def fake_registered_apps(monkeypatch):
+    """Replace both Windows boundaries so no real app can be launched."""
+    import app_launcher
 
-    assert fake_pyautogui.mock_calls == [
-        call.press("win"),
-        call.write("Spotify", interval=0.02),
-        call.press("enter"),
+    apps = [
+        app_launcher.InstalledApp("Spotify", "Spotify.Test!App"),
+        app_launcher.InstalledApp("Notepad", "Notepad.Test!App"),
     ]
+    started = []
+    monkeypatch.setattr(app_launcher, "_read_start_apps", lambda: apps)
+    monkeypatch.setattr(app_launcher, "_start_app", started.append)
+    return started
 
 
-def test_launch_waits_between_keystrokes(fake_pyautogui) -> None:
-    """Without the pauses the name is typed before the menu is listening."""
-    with patch("agent.time.sleep") as sleep:
-        _launch_via_start_menu("Notepad")
-
-    assert sleep.call_count >= 2
-    assert all(args[0] > 0 for args, _ in sleep.call_args_list)
+def test_legacy_launch_selects_the_exact_registered_app(fake_registered_apps) -> None:
+    result = _launch_via_start_menu("Spotify")
+    assert result.app_id == "Spotify.Test!App"
+    assert [app.app_id for app in fake_registered_apps] == ["Spotify.Test!App"]
 
 
-async def test_open_app_reports_what_it_did(fake_pyautogui) -> None:
-    """It cannot confirm the app launched, so it must not claim that it did."""
-    with patch("agent.time.sleep"):
-        result = await Assistant().open_app(None, app_name="Spotify")
-
-    assert "Spotify" in result
-    fake_pyautogui.press.assert_any_call("win")
+def test_launch_never_falls_back_to_web_search(fake_registered_apps) -> None:
+    with pytest.raises(ValueError, match="not installed"):
+        _launch_via_start_menu("ZzQqNotInstalledApp")
+    assert fake_registered_apps == []
 
 
-async def test_open_app_declines_an_empty_name(fake_pyautogui) -> None:
-    """Nothing should be typed at the Start menu when there is no name."""
-    with patch("agent.time.sleep"), pytest.raises(ToolError, match="app name"):
+async def test_open_app_reports_pending_verification(fake_registered_apps) -> None:
+    result = json.loads(await Assistant().open_app(None, app_name="Spotify"))
+    assert result["status"] == "uncertain"
+    assert result["verified"] is False
+    assert result["app_name"] == "Spotify"
+
+
+async def test_open_app_declines_an_empty_name(fake_registered_apps) -> None:
+    with pytest.raises(ToolError, match="app name"):
         await Assistant().open_app(None, app_name="   ")
+    assert fake_registered_apps == []
 
-    assert fake_pyautogui.mock_calls == []
 
+async def test_open_app_surfaces_unavailable_catalogue(monkeypatch) -> None:
+    def unavailable():
+        raise RuntimeError("Windows app catalogue is unavailable")
 
-async def test_open_app_surfaces_a_missing_pyautogui() -> None:
-    """The import fails on a headless host, and must not kill the session.
-
-    src/agent.py deploys to LiveKit Cloud, where there is no desktop at all.
-    A ToolError marks the call failed and gives IRA a message she can say.
-
-    A None entry in sys.modules is how Python signals a blocked import: the
-    `import pyautogui` inside the tool raises ImportError against it.
-    """
-    with (
-        patch.dict(sys.modules, {"pyautogui": None}),
-        pytest.raises(
-            ToolError, match="Cannot open Spotify: desktop control is unavailable"
-        ),
-    ):
+    monkeypatch.setattr("app_launcher._read_start_apps", unavailable)
+    with pytest.raises(ToolError, match="catalogue is unavailable"):
         await Assistant().open_app(None, app_name="Spotify")
 
 
-async def test_open_app_survives_a_desktopless_host(fake_pyautogui) -> None:
-    """PyAutoGUI raises at call time too, e.g. no DISPLAY on Linux."""
-    fake_pyautogui.press.side_effect = RuntimeError("no display")
+async def test_open_app_survives_native_launch_failure(monkeypatch) -> None:
+    from app_launcher import InstalledApp
 
-    with (
-        patch("agent.time.sleep"),
-        pytest.raises(ToolError, match="Could not open Spotify"),
-    ):
+    monkeypatch.setattr(
+        "app_launcher._read_start_apps", lambda: [InstalledApp("Spotify", "Spotify")]
+    )
+
+    def broken(app):
+        raise OSError("native launch failed")
+
+    monkeypatch.setattr("app_launcher._start_app", broken)
+    with pytest.raises(ToolError, match="Could not open Spotify"):
         await Assistant().open_app(None, app_name="Spotify")
 
 

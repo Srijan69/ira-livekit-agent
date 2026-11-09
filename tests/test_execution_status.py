@@ -1,6 +1,7 @@
 """Execution metadata stays correlated without changing tool or voice behavior."""
 
 import asyncio
+import json
 from threading import Event
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -129,16 +130,20 @@ async def test_open_app_manual_events_bind_to_its_call(status_events) -> None:
     reporter, events = status_events
     assistant = Assistant(reporter=reporter)
 
-    with patch("agent._launch_via_start_menu"):
+    with patch(
+        "agent._launch_via_start_menu",
+        return_value=SimpleNamespace(name="Spotify", app_id="Spotify.Test!App"),
+    ):
         result = await assistant.open_app(tool_context("app-1", "open_app"), "Spotify")
 
-    assert "Asked Windows" in result
+    assert json.loads(result)["verified"] is False
     assert [e["state"] for e in events] == ["DELEGATING", "RUNNING", "DONE"]
     assert all(
         (e.get("call_id"), e.get("tool_name"), e.get("source"))
         == ("app-1", "open_app", "tool")
         for e in events
     )
+    assert events[-1]["detail"] == "launch requested; verification pending"
 
 
 async def test_screen_capture_manual_events_bind_to_its_call(

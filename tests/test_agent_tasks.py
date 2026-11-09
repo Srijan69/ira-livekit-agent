@@ -43,10 +43,12 @@ async def test_task_tools_persist_and_only_notify_after_writes(tmp_path):
     events = []
     assistant = Assistant(tasks=store, publish_event=events.append)
     try:
-        assert (
+        saved = json.loads(
             await assistant.add_task(None, "Revision", "2026-10-16T09:00:00+05:30")
-            == "Added, boss."
         )
+        assert saved["ok"] is True
+        assert saved["task"]["title"] == "Revision"
+        assert saved["task"]["due_at"] == "2026-10-16T03:30:00Z"
         assert events == [{"type": "tasks.changed"}]
         listed = json.loads(await assistant.list_tasks(None))
         assert listed[0]["title"] == "Revision"
