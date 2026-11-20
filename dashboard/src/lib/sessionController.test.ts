@@ -40,6 +40,9 @@ class FakeRoom implements RoomLike {
   connectCalls: Array<[string, string]> = [];
   readonly sent: Array<{ text: string; topic: string }> = [];
   private readonly listeners = new Map<string, Set<Listener>>();
+  readonly streams = new Map<string, (reader: AsyncIterable<string>, sender: { identity: string }) => void>();
+  registerTextStreamHandler(topic: string, handler: (reader: AsyncIterable<string>, sender: { identity: string }) => void) { this.streams.set(topic, handler); }
+  unregisterTextStreamHandler(topic: string) { this.streams.delete(topic); }
 
   localParticipant = {
     isSpeaking: false,
@@ -502,6 +505,65 @@ describe("SessionController", () => {
   });
 
   describe("status stream", () => {
+    it("delivers only bounded computer observations from the current room agent", async () => {
+      const t = setup();
+      await t.controller.start();
+      await vi.advanceTimersByTimeAsync(0);
+      t.room().agentJoins();
+      const received: unknown[] = [];
+      t.controller.subscribeEvents((event) => received.push(event));
+      const valid = JSON.stringify({ type: "computer.observation", run_id: "run", call_id: "call", tool_name: "capture_screen", sequence: 1, phase: "unavailable", text: "private" });
+      const stream = async function* (chunks: string[]) { yield* chunks; };
+      t.room().streams.get("computer.observation")?.(stream([valid.slice(0, 20), valid.slice(20)]), { identity: "agent-1" });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(received).toEqual([{ type: "computer.observation", run_id: "run", call_id: "call", tool_name: "capture_screen", sequence: 1, phase: "unavailable" }]);
+      t.room().streams.get("computer.observation")?.(stream([valid]), { identity: "fake" });
+      t.room().streams.get("computer.observation")?.(stream(["x".repeat(512 * 1024 + 1)]), { identity: "agent-1" });
+      t.room().streams.get("computer.observation")?.(stream([JSON.stringify({ ...JSON.parse(valid), text: "界".repeat(180_000) })]), { identity: "agent-1" });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(received).toHaveLength(1);
+      t.controller.dispose();
+      expect(t.room().streams.size).toBe(0);
+    });
+
+    it("bounds stream fragment overhead as well as encoded image bytes", async () => {
+      const t = setup();
+      await t.controller.start(); await vi.advanceTimersByTimeAsync(0); t.room().agentJoins();
+      const received: unknown[] = [];
+      t.controller.subscribeEvents((event) => received.push(event));
+      const fragments = async function* () {
+        for (let n = 0; n < 2049; n++) yield " ";
+        yield JSON.stringify({ type: "computer.observation", run_id: "run", call_id: "call", tool_name: "capture_screen", sequence: 1, phase: "unavailable" });
+      };
+      t.room().streams.get("computer.observation")?.(fragments(), { identity: "agent-1" });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(received).toEqual([]);
+      t.controller.dispose();
+    });
+
+    it("discards a computer stream that finishes after reconnect", async () => {
+      const t = setup();
+      await t.controller.start();
+      await vi.advanceTimersByTimeAsync(0);
+      t.room().agentJoins();
+      const received: Array<{ type: string; phase?: string }> = [];
+      t.controller.subscribeEvents((event) => received.push(event));
+      let finish!: () => void;
+      const wait = new Promise<void>((resolve) => { finish = resolve; });
+      const stream = async function* () {
+        yield '{"type":"computer.observation",';
+        await wait;
+        yield '"run_id":"old","call_id":"call","tool_name":"capture_screen","sequence":1,"phase":"unavailable"}';
+      };
+      t.room().streams.get("computer.observation")?.(stream(), { identity: "agent-1" });
+      await vi.advanceTimersByTimeAsync(0);
+      t.room().emit(RoomEvent.ConnectionStateChanged, ConnectionState.Reconnecting);
+      finish();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(received.filter((event) => event.type === "computer.observation" && event.phase !== "cleared")).toEqual([]);
+      t.controller.dispose();
+    });
+
     it("validates step telemetry and retains waiting skills until resumed or disconnected", async () => {
       const t = setup();
       await t.controller.start();

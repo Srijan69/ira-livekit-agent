@@ -94,3 +94,38 @@ def test_capture_screen_failure_raises_desktop_unavailable_error(tmp_path) -> No
     desktop = DesktopController(mouse=FailingMouse(), capture_dir=tmp_path)
     with pytest.raises(DesktopUnavailableError, match="Screen capture failed"):
         desktop.capture_screen()
+
+
+@pytest.mark.parametrize("text", ["नमस्ते", "café 中文 🙂", "a\u0301", "hello world"])
+def test_desktop_accepts_bounded_printable_unicode(text):
+    from desktop import validate_desktop_text
+
+    validate_desktop_text(text)
+
+
+@pytest.mark.parametrize(
+    "text", ["", "\n", "a\t", "a\x00", "\x7f", "\u0085", "\ud800", "a" * 4001]
+)
+def test_desktop_rejects_control_surrogate_and_unbounded_text(text):
+    from desktop import validate_desktop_text
+
+    with pytest.raises(ValueError):
+        validate_desktop_text(text)
+
+
+def test_window_typing_checks_focus_between_characters():
+    from types import SimpleNamespace
+
+    typed = []
+    window = SimpleNamespace(title="Owned editor", left=0, top=0, width=800, height=600)
+    active = [window]
+
+    def write(text, **kwargs):
+        typed.append(text)
+        active[0] = SimpleNamespace(title="Other app")
+
+    backend = SimpleNamespace(getActiveWindow=lambda: active[0], write=write)
+    controller = DesktopController(mouse=backend)
+    with pytest.raises(DesktopUnavailableError, match=r"input|focus|foreground"):
+        controller.type_in_window("abc", "Owned editor")
+    assert typed == ["a"]

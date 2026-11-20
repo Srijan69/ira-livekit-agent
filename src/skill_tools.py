@@ -72,6 +72,7 @@ CAPABILITIES = {
         "scroll_mouse",
         "drag_mouse",
         "type_on_desktop",
+        "press_desktop_key",
     ),
     "skills": (
         "list_skills",
@@ -314,7 +315,7 @@ class SkillTools:
     async def run_skill(
         self, context: RunContext, name: str, inputs_json: str = "{}"
     ) -> str:
-        """Run an enabled saved skill by name/slug. Inputs are a JSON object. If waiting, ask the returned question and use answer_skill with its IDs to continue."""
+        """Load a Hermes procedure and follow its returned instructions with actual tools; procedure_ready is not completion. Names may use procedure:category/name. Optional compiled workflows use workflow:slug; those execute verified steps and may return waiting for answer_skill."""
         run_id = None
         try:
             from tool_dispatch import repair_json_string
@@ -322,9 +323,45 @@ class SkillTools:
             inputs = json.loads(repair_json_string(inputs_json))
             if not isinstance(inputs, dict):
                 raise ValueError("Skill inputs must be a JSON object.")
-            skill = await asyncio.to_thread(self._skills.get, name)
+            procedure = (
+                None
+                if name.startswith("workflow:")
+                else await asyncio.to_thread(self._skills_catalog.get_skill, name)
+            )
+            workflow_name = name.removeprefix("workflow:")
+            skill = (
+                None
+                if name.startswith("procedure:")
+                else await asyncio.to_thread(self._skills.get, workflow_name)
+            )
+            if procedure is not None:
+                if skill is not None and not name.startswith("procedure:"):
+                    raise ValueError(
+                        "Ambiguous skill. Choose procedure:category/name or workflow:slug from list_skills."
+                    )
+                instructions = await self.skill_view(
+                    context,
+                    f"procedure:{procedure.path.parent.relative_to(self._skills_catalog.root).as_posix()}",
+                )
+                return json.dumps(
+                    {
+                        "status": "procedure_ready",
+                        "mode": "procedure",
+                        "name": procedure.name,
+                        "inputs": inputs,
+                        "instructions": instructions,
+                        "next": "Execute the procedure with available tools under the current human request, observe results, and continue until the requested goal is verified. This call only loaded instructions; no action has run.",
+                    },
+                    ensure_ascii=False,
+                )
             if skill is None:
-                skill = await asyncio.to_thread(self._skills.find_by_phrase, name)
+                skill = (
+                    None
+                    if name.startswith("procedure:")
+                    else await asyncio.to_thread(
+                        self._skills.find_by_phrase, workflow_name
+                    )
+                )
             if skill is None:
                 raise ValueError(
                     "Skill not found. Use list_skills to inspect saved procedures."
@@ -439,18 +476,25 @@ class SkillTools:
 
     @function_tool
     async def list_skills(self, context: RunContext) -> str:
-        """List saved skills and whether they are drafts or enabled."""
+        """List Hermes procedures (follow with tools) and optional compiled workflows (draft/enabled)."""
         rows = await asyncio.to_thread(self._skills.catalog)
-        return (
-            "\n".join(f"{r['slug']} [{r['state']}]: {r['description']}" for r in rows)[
-                :MODEL_OUTPUT_LIMIT
-            ]
-            or "No skills saved."
+        procedures = await self.skills_list(context)
+        workflows = "\n".join(
+            f"workflow:{r['slug']} [compiled, {r['state']}]: {r['description']}"
+            for r in rows
+        )
+        return procedures + (
+            "\nOptional compiled workflows:\n" + workflows if workflows else ""
         )
 
     @function_tool
     async def view_skill(self, context: RunContext, name: str) -> str:
-        """View the full Markdown specification of a saved skill by name or slug."""
+        """Read a Hermes procedure by name (alias of skill_view) or a workflow:slug specification."""
+        if not name.startswith("workflow:"):
+            return await self.skill_view(context, name)
+        return await self._view_compiled_skill(name.removeprefix("workflow:"))
+
+    async def _view_compiled_skill(self, name: str) -> str:
         skill = await asyncio.to_thread(self._skills.get, name)
         if skill is None:
             skill = await asyncio.to_thread(self._skills.find_by_phrase, name)
@@ -458,7 +502,7 @@ class SkillTools:
             return f"Skill '{name}' not found. Use list_skills to inspect available procedures."
         from skill_format import render_skill
 
-        return render_skill(skill)[:MODEL_OUTPUT_LIMIT]
+        return "Mode: compiled workflow\n" + render_skill(skill)
 
     async def save_skill(self, context: RunContext, markdown: str) -> str:
         """Save a user-provided procedure as a draft Markdown skill; saving never enables execution."""

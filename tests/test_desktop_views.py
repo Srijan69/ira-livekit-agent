@@ -311,3 +311,182 @@ async def test_frame_replaced_during_model_delivery_is_not_actionable(
     with pytest.raises(ToolError, match=r"delivered|changed|available"):
         await assistant.capture_screen(context)
     assert assistant._computer._frame is None
+
+
+def test_detail_cannot_click_named_control_outside_delivered_crop(view_desktop):
+    computer, backend, _, _, events, _ = view_desktop
+    backend.get_accessible_elements = lambda _: [
+        {
+            "identity": "inside",
+            "name": "Inside crop",
+            "role": "Button",
+            "bounds": [800, 200, 100, 50],
+        },
+        {
+            "identity": "outside",
+            "name": "Outside crop",
+            "role": "Button",
+            "bounds": [100, 100, 100, 50],
+        },
+    ]
+    overview = computer.observe()
+    detail = computer.detail(overview.id, 400, 100, 400, 300)
+    assert [target.name for target in detail.targets] == ["Inside crop"]
+    previews = []
+    computer.act(
+        detail.id,
+        "click_target",
+        target_id=detail.targets[0].id,
+        _on_action=lambda f, a: previews.append((f.id, a)),
+    )
+    assert previews[0][0] == detail.id
+    assert previews[0][1]["image_points"] == [[100, 38]]
+    assert previews[0][1]["target"]["image_bounds"] == [50, 13, 100, 50]
+    assert events == [("click", 850, 225)]
+
+
+def test_focus_callback_uses_observed_window_and_revocation_prevents_activation(
+    view_desktop,
+):
+    computer, _, _, windows, events, _ = view_desktop
+    second = SimpleNamespace(
+        title="Editor",
+        left=600,
+        top=100,
+        width=800,
+        height=700,
+        activate=lambda: events.append("focus"),
+    )
+    windows.append(second)
+    frame = computer.observe()
+    target = next(w for w in frame.windows if w.window.title == "Editor")
+    revoked = [False]
+    previews = []
+
+    def preview(before, action):
+        assert before is frame
+        previews.append(action)
+        revoked[0] = True
+
+    def permit():
+        if revoked[0]:
+            raise PermissionError("request stopped")
+
+    with pytest.raises(PermissionError, match="stopped"):
+        computer.focus(frame.id, target.id, _permit_check=permit, _on_action=preview)
+    assert previews == [
+        {
+            "action": "focus",
+            "observation_id": frame.id,
+            "image_points": [],
+            "window": {
+                "id": target.id,
+                "title": "Editor",
+                "image_bounds": [320, 53, 427, 373],
+            },
+        }
+    ]
+    assert events == []
+
+
+def test_focus_drift_during_capture_requires_new_observation(view_desktop):
+    from computer_use import DesktopChangedDuringCaptureError
+
+    computer, backend, _, _, events, _ = view_desktop
+    focus = ["first-field"]
+    backend.get_keyboard_focus = lambda _: focus[0]
+    screenshot = backend.screenshot
+
+    def changed_capture():
+        focus[0] = "second-field"
+        return screenshot()
+
+    backend.screenshot = changed_capture
+    with pytest.raises(DesktopChangedDuringCaptureError, match="changed"):
+        computer.observe()
+    assert computer.describe(include_image=False) == {}
+    assert events == []
+
+
+def test_focus_waits_for_owned_window_before_capturing_result(
+    view_desktop, monkeypatch
+):
+    import computer_use
+
+    computer, _, active, windows, events, _ = view_desktop
+    second = SimpleNamespace(title="Editor", left=600, top=100, width=800, height=700)
+    second.activate = lambda: events.append("focus")
+    windows.append(second)
+    frame = computer.observe()
+    target = next(w for w in frame.windows if w.window.title == "Editor")
+    monkeypatch.setattr(
+        computer_use.time, "sleep", lambda _: active.__setitem__(0, second)
+    )
+    result = computer.focus(frame.id, target.id)
+    assert result.window.title == "Editor"
+    assert events == ["focus"]
+
+
+def test_focus_indicator_revocation_prevents_activation(view_desktop):
+    from contextlib import contextmanager
+
+    computer, _, _, windows, events, _ = view_desktop
+    second = SimpleNamespace(
+        title="Editor",
+        left=600,
+        top=100,
+        width=800,
+        height=700,
+        activate=lambda: events.append("focus"),
+    )
+    windows.append(second)
+    frame = computer.observe()
+    target = next(w for w in frame.windows if w.window.title == "Editor")
+    revoked = [False]
+
+    @contextmanager
+    def indicator(*_):
+        revoked[0] = True
+        yield
+
+    computer.indicator = indicator
+
+    def permit():
+        if revoked[0]:
+            raise PermissionError("stopped")
+
+    with pytest.raises(PermissionError, match="stopped"):
+        computer.focus(frame.id, target.id, _permit_check=permit)
+    assert events == []
+
+
+def test_focus_timeout_cannot_replay_activation_or_publish_old_window(
+    view_desktop, monkeypatch
+):
+    import computer_use
+
+    computer, backend, _, windows, events, _ = view_desktop
+    captures = []
+    screenshot = backend.screenshot
+    backend.screenshot = lambda: captures.append("capture") or screenshot()
+    second = SimpleNamespace(
+        title="Editor",
+        left=600,
+        top=100,
+        width=800,
+        height=700,
+        activate=lambda: events.append("focus"),
+    )
+    windows.append(second)
+    clock = [100.0]
+    monkeypatch.setattr(computer_use.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(
+        computer_use.time, "sleep", lambda _: clock.__setitem__(0, clock[0] + 0.25)
+    )
+    frame = computer.observe()
+    target = next(w for w in frame.windows if w.window.title == "Editor")
+    with pytest.raises(RuntimeError, match="not verified"):
+        computer.focus(frame.id, target.id)
+    assert events == ["focus"]
+    assert captures == ["capture"]
+    assert computer.describe(include_image=False) == {}

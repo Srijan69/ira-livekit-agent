@@ -402,3 +402,275 @@ def test_post_click_window_transition_recaptures_without_replaying_input(observe
     after = computer.act(frame.id, "click", x=819, y=230)
     assert after.window.title == "Opened kommidi"
     assert len(clicks) == 1
+
+
+def test_control_drift_during_capture_is_not_published_as_observed(observed):
+    from computer_use import DesktopChangedDuringCaptureError
+
+    computer, backend, _, _, clicks = observed
+    control = {
+        "identity": "save",
+        "name": "Save",
+        "role": "Button",
+        "bounds": [100, 100, 100, 40],
+    }
+    backend.get_accessible_elements = lambda _: [control.copy()]
+    screenshot = backend.screenshot
+
+    def changed_capture():
+        control["bounds"] = [300, 100, 100, 40]
+        return screenshot()
+
+    backend.screenshot = changed_capture
+    with pytest.raises(DesktopChangedDuringCaptureError, match="changed"):
+        computer.observe()
+    assert computer.describe(include_image=False) == {}
+    assert clicks == []
+
+
+def test_typing_refuses_changed_keyboard_field_in_same_window(observed):
+    computer, backend, _, _, clicks = observed
+    focus = ["search-field"]
+    backend.get_keyboard_focus = lambda _: focus[0]
+    frame = computer.observe()
+    focus[0] = "message-field"
+    with pytest.raises(ValueError, match=r"focus|changed"):
+        computer.act(frame.id, "type", text="private input")
+    assert clicks == []
+
+
+def test_typing_refuses_changed_uia_focus_in_same_native_child(observed):
+    computer, backend, _, _, clicks = observed
+    backend.get_keyboard_focus = lambda _: 123
+    controls = [
+        {
+            "identity": "search",
+            "name": "Search",
+            "role": "Edit",
+            "bounds": [100, 100, 100, 40],
+            "has_keyboard_focus": True,
+        },
+        {
+            "identity": "message",
+            "name": "Message",
+            "role": "Edit",
+            "bounds": [100, 200, 100, 40],
+            "has_keyboard_focus": False,
+        },
+    ]
+    backend.get_accessible_elements = lambda _: [c.copy() for c in controls]
+    frame = computer.observe()
+    controls[0]["has_keyboard_focus"] = False
+    controls[1]["has_keyboard_focus"] = True
+    with pytest.raises(ValueError, match=r"focus|changed"):
+        computer.act(frame.id, "type", text="private input")
+    assert clicks == []
+
+
+def test_action_callback_marks_exact_target_in_pre_action_image(observed):
+    computer, backend, _, _, clicks = observed
+    backend.get_accessible_elements = lambda _: [
+        {
+            "identity": "p3",
+            "name": "kommidi",
+            "role": "Button",
+            "bounds": [1240, 240, 360, 290],
+        }
+    ]
+    frame = computer.observe()
+    target = frame.targets[0]
+    previews = []
+
+    def preview(before, action):
+        assert before is frame
+        assert clicks == []
+        previews.append(action)
+
+    after = computer.act(
+        frame.id, "click_target", target_id=target.id, _on_action=preview
+    )
+    assert previews == [
+        {
+            "action": "click_target",
+            "observation_id": frame.id,
+            "image_points": [[757, 205]],
+            "target": {
+                "id": target.id,
+                "name": "kommidi",
+                "role": "Button",
+                "image_bounds": [661, 128, 192, 155],
+            },
+        }
+    ]
+    assert after.id != frame.id
+    assert clicks == [(1420, 385, {"button": "left"})]
+
+
+def test_action_callback_never_contains_typed_content(observed):
+    computer, _, _, _, clicks = observed
+    frame = computer.observe()
+    previews = []
+    computer.act(
+        frame.id,
+        "type",
+        text="Private text",
+        _on_action=lambda _, a: previews.append(a),
+    )
+    assert previews == [
+        {"action": "type", "observation_id": frame.id, "image_points": []}
+    ]
+    assert (
+        "".join(text for action, text in clicks if action == "text") == "Private text"
+    )
+
+
+def test_callback_revocation_stops_input_and_consumes_frame(observed):
+    computer, _, _, _, clicks = observed
+    frame = computer.observe()
+    revoked = [False]
+
+    def permit():
+        if revoked[0]:
+            raise PermissionError("stopped")
+
+    with pytest.raises(PermissionError, match="stopped"):
+        computer.act(
+            frame.id,
+            "click",
+            x=300,
+            y=200,
+            _permit_check=permit,
+            _on_action=lambda *_: revoked.__setitem__(0, True),
+        )
+    assert clicks == []
+    assert computer.describe(include_image=False) == {}
+
+
+def test_preview_failure_does_not_prevent_guarded_input(observed):
+    computer, _, _, _, clicks = observed
+    frame = computer.observe()
+
+    def failed_preview(*_):
+        raise OSError("dashboard disconnected")
+
+    after = computer.act(frame.id, "click", x=300, y=200, _on_action=failed_preview)
+    assert after.id != frame.id
+    assert len(clicks) == 1
+
+
+def test_describe_data_url_uses_exact_canvas_and_metadata_stays_small(observed):
+    import base64
+
+    computer, *_ = observed
+    frame = computer.observe()
+    meta = computer.describe(include_image=False)
+    assert meta["captured_at"] == frame.capture.captured_at
+    assert "screenshot_data_url" not in meta
+    description = computer.describe()
+    prefix, encoded = description["screenshot_data_url"].split(",", 1)
+    assert prefix == "data:image/jpeg;base64"
+    with Image.open(io.BytesIO(base64.b64decode(encoded))) as image:
+        assert image.size == (1024, 576)
+    assert len(encoded) < 450_000
+
+
+def test_key_action_uses_fresh_focus_and_omits_key_from_preview(observed):
+    computer, backend, _, _, effects = observed
+    backend.press = lambda key: effects.append(("key", key))
+    backend.get_keyboard_focus = lambda _: "owned-field"
+    frame = computer.observe()
+    previews = []
+    result = computer.act(
+        frame.id, "key", key="tab", _on_action=lambda _, a: previews.append(a)
+    )
+    assert effects == [("key", "tab")]
+    assert previews == [
+        {"action": "key", "observation_id": frame.id, "image_points": []}
+    ]
+    assert result.id != frame.id
+
+
+@pytest.mark.parametrize("key", ["win", "ctrl", "a", "ctrl+a", "f5", ""])
+def test_key_action_rejects_unverified_shortcuts_before_preview(observed, key):
+    computer, backend, _, _, effects = observed
+    backend.press = lambda key: effects.append(("key", key))
+    frame = computer.observe()
+    previews = []
+    with pytest.raises(ValueError):
+        computer.act(
+            frame.id, "key", key=key, _on_action=lambda _, a: previews.append(a)
+        )
+    assert effects == []
+    assert previews == []
+
+
+def test_keyboard_focus_drift_during_preview_refuses_key(observed):
+    computer, backend, _, _, effects = observed
+    backend.press = lambda key: effects.append(("key", key))
+    focus = ["owned-field"]
+    backend.get_keyboard_focus = lambda _: focus[0]
+    frame = computer.observe()
+    with pytest.raises(ValueError, match=r"focus|changed"):
+        computer.act(
+            frame.id,
+            "key",
+            key="enter",
+            _on_action=lambda *_: focus.__setitem__(0, "other-field"),
+        )
+    assert effects == []
+
+
+def test_stopped_request_after_input_does_not_capture_or_replay(observed):
+    computer, backend, _, _, effects = observed
+    screenshots = []
+    screenshot = backend.screenshot
+    backend.screenshot = lambda: screenshots.append("capture") or screenshot()
+    stopped = [False]
+
+    def click(x, y, **kwargs):
+        effects.append(("click", x, y))
+        stopped[0] = True
+
+    def permit():
+        if stopped[0]:
+            raise PermissionError("request stopped")
+
+    backend.click = click
+    frame = computer.observe()
+    with pytest.raises(
+        RuntimeError, match="Input was sent but the result is not verified"
+    ):
+        computer.act(frame.id, "click", x=300, y=200, _permit_check=permit)
+    assert effects == [("click", 563, 375)]
+    assert screenshots == ["capture"]
+    assert computer.describe(include_image=False) == {}
+
+
+def test_noisy_screenshot_is_bounded_without_changing_coordinate_canvas(observed):
+    import base64
+    import random
+
+    computer, backend, _, _, _ = observed
+    backend.size = lambda: (1024, 1024)
+    pixels = random.Random(0).randbytes(1024 * 1024 * 3)
+    backend.screenshot = lambda: Image.frombytes("RGB", (1024, 1024), pixels)
+    computer.observe()
+    description = computer.describe()
+    encoded = description["screenshot_data_url"].split(",", 1)[1]
+    image_bytes = base64.b64decode(encoded)
+    assert len(image_bytes) <= 300_000
+    with Image.open(io.BytesIO(image_bytes)) as image:
+        assert image.size == (1024, 1024)
+
+
+def test_action_marker_roundtrips_native_pixel_center_at_fractional_scale(observed):
+    computer, backend, _, _, effects = observed
+    backend.size = lambda: (1100, 600)
+    backend.screenshot = lambda: Image.new("RGB", (1100, 600))
+    frame = computer.observe()
+    previews = []
+    computer.act(
+        frame.id, "click", x=1, y=1, _on_action=lambda _, a: previews.append(a)
+    )
+    assert effects == [(1, 1, {"button": "left"})]
+    assert previews[0]["image_points"] == [[1, 1]]

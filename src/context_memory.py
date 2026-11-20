@@ -15,6 +15,7 @@ from context_summary import (
     summary_source_ids,
     validate_summary,
 )
+from personal_memory import profile_context
 
 
 class ContextApplyDeferred(Exception):  # noqa: N818 - a deferral, not a failure
@@ -74,6 +75,7 @@ class ContextMemoryController:
         is_idle,
         invalidate,
         base_tokens: int | Callable[[], int] = 0,
+        estimate_context_tokens: Callable[[dict, list[dict], dict], int] | None = None,
         retry_delay_seconds: float = 5.0,
         flush_timeout_seconds: float = 8.0,
     ):
@@ -85,6 +87,7 @@ class ContextMemoryController:
         self.is_idle = is_idle
         self.invalidate = invalidate
         self.base_tokens = base_tokens
+        self.estimate_context_tokens = estimate_context_tokens
         self.retry_delay_seconds = retry_delay_seconds
         self.flush_timeout_seconds = flush_timeout_seconds
         self.conversation_id: str | None = None
@@ -474,15 +477,22 @@ class ContextMemoryController:
             )
             self._retry_at = time.monotonic() + self.retry_delay_seconds
 
+    async def _context_tokens(self, summary, tail, profile):
+        if self.estimate_context_tokens is not None:
+            return await asyncio.to_thread(
+                self.estimate_context_tokens, summary, tail, profile
+            )
+        return (
+            self._base()
+            + estimate_tokens(profile_context(profile))
+            + estimate_tokens(summary)
+            + estimate_tokens(tail)
+        )
+
     async def _apply_pending(self, settings, profile):
         checkpoint = self._pending
         tail = copy.deepcopy(self._tail(checkpoint["through_seq"]))
-        reconstructed = (
-            self._base()
-            + estimate_tokens(profile)
-            + estimate_tokens(checkpoint["summary"])
-            + estimate_tokens(tail)
-        )
+        reconstructed = await self._context_tokens(checkpoint["summary"], tail, profile)
         limit = settings["context_budget"] - 2048
         if reconstructed > limit:
             prefix = self._prefix(settings, profile, pressure=True)
@@ -504,20 +514,18 @@ class ContextMemoryController:
             await self._refresh_revision()
             return
         tail = copy.deepcopy(self._tail(checkpoint["through_seq"]))
-        reconstructed = (
-            self._base()
-            + estimate_tokens(latest_profile)
-            + estimate_tokens(checkpoint["summary"])
-            + estimate_tokens(tail)
+        arrival_version = self._arrival_version
+        reconstructed = await self._context_tokens(
+            checkpoint["summary"], tail, latest_profile
         )
         if (
             reconstructed > limit
+            or arrival_version != self._arrival_version
             or not self.is_idle()
             or any(not complete for _, _, complete in _tool_spans(tail))
         ):
             self._state = "waiting_to_compact"
             return
-        arrival_version = self._arrival_version
         self._state = "compacting"
         self._provider_ready = False
         self._provider_generation += 1

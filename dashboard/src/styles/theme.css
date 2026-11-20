@@ -1525,6 +1525,9 @@
   display: flex;
   flex-direction: column;
   min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
 }
 
 .execution-history[hidden] {
@@ -1548,14 +1551,66 @@
 }
 
 .execution-list {
+  flex-shrink: 0;
   min-height: 0;
   margin: 0;
   padding: 0 4px 3px 0;
-  overflow-y: auto;
+  overflow-y: visible;
   overscroll-behavior: contain;
   list-style: none;
   scrollbar-width: thin;
 }
+
+/* Observations stay inside the curved readout; the enlarged screen is a portal. */
+.computer-preview { flex-shrink: 0; min-width: 0; padding: 8px 0 10px; border-top: 1px solid rgb(var(--accent-rgb) / .14); }
+.computer-preview-heading, .computer-frame-heading, .computer-image-caption { display: flex; align-items: center; justify-content: space-between; gap: 7px; }
+.computer-preview-toggle { display: flex; align-items: center; gap: 6px; min-width: 0; border: 0; padding: 0; background: none; color: var(--color-dim); font-size: 10px; font-weight: 500; cursor: pointer; }
+.computer-preview-toggle > svg:first-child { color: var(--color-cyan); flex-shrink: 0; }
+.computer-preview-toggle > svg:last-child { margin-left: 2px; color: var(--color-mute); transition: transform 160ms ease; }
+.computer-preview-toggle[aria-expanded="false"] > svg:last-child { transform: rotate(-90deg); }
+.computer-freshness { flex-shrink: 0; font-size: 8px; color: var(--color-mute); }
+.computer-preview[data-status="observed"] .computer-freshness { color: var(--color-cyan); }
+.computer-preview[data-status="stale"] .computer-freshness, .computer-preview[data-status="unavailable"] .computer-freshness { color: var(--color-warn); }
+.computer-preview-content[hidden] { display: none; }
+.computer-frame-heading { padding: 8px 0 5px; font-size: 9px; color: var(--color-dim); }
+.computer-frame-switch { display: flex; gap: 3px; }
+.computer-frame-switch button { padding: 3px 7px; border: 1px solid transparent; border-radius: 4px; background: none; color: var(--color-mute); font-size: 9px; cursor: pointer; }
+.computer-frame-switch button[aria-pressed="true"] { color: var(--color-cyan); border-color: rgb(var(--accent-rgb) / .2); background: rgb(var(--accent-rgb) / .08); }
+.computer-image-tools { display: flex; gap: 4px; }
+.computer-image-tools button { display: grid; place-items: center; width: 23px; height: 22px; padding: 0; border: 0; border-radius: 4px; background: rgb(var(--accent-rgb) / .05); color: var(--color-dim); cursor: pointer; }
+.computer-image-tools button:hover, .computer-image-tools button[aria-pressed="true"] { color: var(--color-cyan); background: rgb(var(--accent-rgb) / .12); }
+.computer-image { position: relative; width: 100%; border: 1px solid rgb(var(--accent-rgb) / .22); border-radius: 6px; overflow: hidden; background: var(--color-deep); text-shadow: none; }
+.computer-image > img { display: block; width: 100%; height: 100%; object-fit: fill; }
+.computer-image-overlay { position: absolute; inset: 0; width: 100%; height: 100%; overflow: hidden; pointer-events: none; }
+.computer-target { fill: rgb(var(--accent-rgb) / .035); stroke: var(--color-cyan); stroke-width: 1; vector-effect: non-scaling-stroke; }
+[data-selected="true"] > .computer-target { fill: rgb(var(--accent-rgb) / .12); stroke-width: 2; }
+.computer-window-target { fill: none; stroke: var(--color-cyan); stroke-dasharray: 5 3; stroke-width: 1.5; vector-effect: non-scaling-stroke; }
+.computer-action-ring { fill: rgb(var(--accent-rgb) / .2); stroke: var(--color-cyan); stroke-width: 2; vector-effect: non-scaling-stroke; }
+.computer-action-center { fill: #fff; stroke: var(--color-cyan); stroke-width: 1; vector-effect: non-scaling-stroke; }
+.computer-action-path { fill: none; stroke: var(--color-cyan); stroke-width: 2; stroke-dasharray: 5 3; vector-effect: non-scaling-stroke; }
+.computer-cursor { fill: #fff; stroke: var(--color-deep); stroke-width: 1; vector-effect: non-scaling-stroke; }
+.computer-image-caption { margin-top: 5px; font-size: 9px; line-height: 1.5; color: var(--color-dim); }
+.computer-image-caption > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.computer-image-caption time { flex-shrink: 0; color: var(--color-mute); font-variant-numeric: tabular-nums; }
+.computer-empty, .computer-stale-note { margin: 7px 0 0; font-size: 10px; line-height: 1.6; color: var(--color-mute); }
+.computer-stale-note { color: var(--color-warn); font-size: 9px; }
+.computer-action-timeline { list-style: none; padding: 6px 0 0; margin: 5px 0 0; border-top: 1px solid rgb(var(--accent-rgb) / .1); }
+.computer-action-timeline li { display: flex; align-items: flex-start; gap: 6px; padding: 4px 0; }
+.computer-action-timeline li > svg { margin-top: 3px; flex-shrink: 0; color: var(--color-cyan); }
+.computer-action-timeline li > div { min-width: 0; }
+.computer-action-timeline span { display: block; color: var(--color-text); font-size: 10px; line-height: 1.5; }
+.computer-action-timeline small { display: block; color: var(--color-mute); font-size: 9px; line-height: 1.5; overflow-wrap: anywhere; }
+.computer-preview button:focus-visible, .computer-screen-modal button:focus-visible { outline: 2px solid var(--color-cyan); outline-offset: 3px; }
+.computer-screen-backdrop { position: fixed; z-index: 200; inset: 0; display: grid; place-items: center; padding: 24px; background: rgb(var(--deep-rgb) / .87); backdrop-filter: blur(12px); }
+.computer-screen-modal { display: flex; flex-direction: column; width: min(1100px, 100%); max-height: calc(100dvh - 48px); min-height: 0; padding: 18px; border: 1px solid rgb(var(--accent-rgb) / .3); border-radius: 15px; background: var(--color-deep); box-shadow: 0 20px 90px #0008; }
+.computer-screen-modal header { display: flex; align-items: center; justify-content: space-between; gap: 14px; flex-shrink: 0; padding-bottom: 13px; }
+.computer-screen-modal h2 { margin: 0; color: var(--color-text); font-size: 15px; font-weight: 500; }
+.computer-screen-modal header p, .computer-modal-caption { margin: 4px 0 0; color: var(--color-dim); font-size: 11px; }
+.computer-screen-modal header button { display: grid; place-items: center; flex-shrink: 0; width: 32px; height: 32px; border: 0; border-radius: 6px; background: rgb(var(--accent-rgb) / .08); color: var(--color-dim); cursor: pointer; }
+.computer-screen-modal .computer-image { align-self: center; flex-shrink: 0; min-height: 0; }
+.computer-screen-modal .computer-image > img { object-fit: contain; }
+.computer-modal-caption { padding-top: 8px; overflow-wrap: anywhere; }
+@media (prefers-reduced-motion: reduce) { .computer-preview-toggle > svg:last-child { transition: none; } }
 
 .execution-row {
   --execution-tone: var(--color-cyan);

@@ -279,11 +279,105 @@ def validate_desktop_text(text: str) -> None:
     if (
         not isinstance(text, str)
         or not 1 <= len(text) <= 4000
-        or any(not 32 <= ord(char) <= 126 for char in text)
+        or not text.isprintable()
     ):
         raise ValueError(
-            "Desktop text must contain 1 to 4000 printable ASCII characters."
+            "Desktop text must contain 1 to 4000 printable Unicode characters."
         )
+
+
+def _keyboard_focus_win32(handle: int) -> int | None:
+    """Read the foreground thread's actual keyboard child without taking focus."""
+    import ctypes
+    from ctypes import wintypes as w
+
+    class GuiThreadInfo(ctypes.Structure):
+        _fields_ = [
+            ("cbSize", w.DWORD),
+            ("flags", w.DWORD),
+            ("hwndActive", w.HWND),
+            ("hwndFocus", w.HWND),
+            ("hwndCapture", w.HWND),
+            ("hwndMenuOwner", w.HWND),
+            ("hwndMoveSize", w.HWND),
+            ("hwndCaret", w.HWND),
+            ("rcCaret", w.RECT),
+        ]
+
+    api = ctypes.WinDLL("user32", use_last_error=True)
+    api.GetWindowThreadProcessId.argtypes = [w.HWND, ctypes.POINTER(w.DWORD)]
+    api.GetWindowThreadProcessId.restype = w.DWORD
+    api.GetGUIThreadInfo.argtypes = [w.DWORD, ctypes.POINTER(GuiThreadInfo)]
+    api.GetGUIThreadInfo.restype = w.BOOL
+    api.GetForegroundWindow.restype = w.HWND
+    thread = api.GetWindowThreadProcessId(handle, None)
+    info = GuiThreadInfo(cbSize=ctypes.sizeof(GuiThreadInfo))
+    if not thread or not api.GetGUIThreadInfo(thread, ctypes.byref(info)):
+        raise DesktopUnavailableError("The desktop keyboard focus is unavailable.")
+    if api.GetForegroundWindow() != handle or info.hwndActive != handle:
+        raise ValueError("The foreground window changed while reading keyboard focus.")
+    return int(info.hwndFocus) if info.hwndFocus else None
+
+
+def _send_unicode_text_win32(text: str, guard: Callable[[], None]) -> None:
+    """Send complete UTF-16 characters; release a partially delivered key."""
+    import ctypes
+    from ctypes import wintypes as w
+
+    class KeyboardInput(ctypes.Structure):
+        _fields_ = [
+            ("vk", w.WORD),
+            ("scan", w.WORD),
+            ("flags", w.DWORD),
+            ("time", w.DWORD),
+            ("extra", ctypes.c_size_t),
+        ]
+
+    class MouseInput(ctypes.Structure):
+        _fields_ = [
+            ("x", w.LONG),
+            ("y", w.LONG),
+            ("data", w.DWORD),
+            ("flags", w.DWORD),
+            ("time", w.DWORD),
+            ("extra", ctypes.c_size_t),
+        ]
+
+    class InputData(ctypes.Union):
+        _fields_ = [("keyboard", KeyboardInput), ("mouse", MouseInput)]
+
+    class Input(ctypes.Structure):
+        _anonymous_ = ("data",)
+        _fields_ = [("type", w.DWORD), ("data", InputData)]
+
+    api = ctypes.WinDLL("user32", use_last_error=True)
+    api.SendInput.argtypes = [w.UINT, ctypes.POINTER(Input), ctypes.c_int]
+    api.SendInput.restype = w.UINT
+    for character in text:
+        encoded = character.encode("utf-16-le")
+        units = [
+            int.from_bytes(encoded[i : i + 2], "little")
+            for i in range(0, len(encoded), 2)
+        ]
+        events = (Input * (2 * len(units)))(
+            *(
+                Input(type=1, keyboard=KeyboardInput(scan=unit, flags=flags))
+                for unit in units
+                for flags in (4, 6)
+            )
+        )
+        guard()
+        sent = api.SendInput(len(events), events, ctypes.sizeof(Input))
+        if sent != len(events):
+            if 0 < sent < len(events) and sent % 2:
+                release = Input(
+                    type=1, keyboard=KeyboardInput(scan=units[sent // 2], flags=6)
+                )
+                # Cleanup retains ownership even after authority/focus was revoked.
+                api.SendInput(1, ctypes.byref(release), ctypes.sizeof(Input))
+            raise DesktopUnavailableError(
+                "Unicode input was incomplete; its result is uncertain."
+            )
 
 
 def validate_desktop_key(key: str) -> None:
@@ -424,6 +518,53 @@ class DesktopController:
                 "Windows accessibility snapshot unavailable"
             )
             return []
+
+    @contextmanager
+    def focused_control_observer(self):
+        """Read only the focused UIA control between characters, without tree walks."""
+        if self._is_windows_backend():
+            from desktop_accessibility import (
+                FocusObservationError,
+                focused_control_observer,
+            )
+
+            try:
+                with focused_control_observer() as snapshot:
+                    yield snapshot
+            except FocusObservationError as exc:
+                raise DesktopUnavailableError(
+                    "The focused desktop control could not be verified."
+                ) from exc
+        else:
+            yield lambda: [
+                element
+                for element in self.accessible_elements(self._active_window())
+                if element.get("has_keyboard_focus", False)
+            ]
+
+    @staticmethod
+    def _focus_control_stamp(controls, *, include_bounds=True):
+        return sorted(
+            (
+                element["identity"],
+                element["role"],
+                tuple(element["bounds"]) if include_bounds else (),
+                bool(element.get("is_password", False)),
+                bool(element.get("has_keyboard_focus", False)),
+            )
+            for element in controls
+        )
+
+    @_physical_desktop_method
+    def keyboard_focus(self, window=None):
+        window = self._active_window() if window is None else window
+        injected = getattr(self._backend, "get_keyboard_focus", None)
+        if injected is not None:
+            return injected(window)
+        handle = getattr(window, "_hWnd", None)
+        if self._is_windows_backend() and handle is not None:
+            return _keyboard_focus_win32(int(handle))
+        return None
 
     def window_titles(self) -> list[str]:
         """Observe open windows without changing focus."""
@@ -595,24 +736,57 @@ class DesktopController:
             _guard=lambda: self._guard_points(window_title, points, identity),
         )
 
-    def type_in_window(self, text: str, window_title: str) -> None:
+    def type_in_window(
+        self, text: str, window_title: str, *, _guard=None, _focused_targets=()
+    ) -> None:
         """Type bounded printable text only while the intended window has focus."""
         validate_desktop_text(text)
         validate_window_title(window_title)
         window = self._require_foreground(window_title)
-        self._require_foreground(window_title, identity=self._window_identity(window))
-        try:
-            self.type_text(text)
-        except Exception:
-            raise DesktopUnavailableError(
-                "The guarded desktop text input failed."
-            ) from None
+        identity = self._window_identity(window)
+        focus = self.keyboard_focus(window)
 
-    def press_in_window(self, key: str, window_title: str) -> None:
+        with self.focused_control_observer() as snapshot:
+            initial = snapshot()
+            if _focused_targets and self._focus_control_stamp(
+                initial
+            ) != self._focus_control_stamp(_focused_targets):
+                raise ValueError("The focused control changed before text input.")
+            observed = self._focus_control_stamp(initial, include_bounds=False)
+
+            def check_window():
+                if _guard is not None:
+                    _guard()
+                current = self._require_foreground(window_title, identity=identity)
+                if self.keyboard_focus(current) != focus:
+                    raise ValueError("The keyboard focus changed during text input.")
+                self.input_guard()
+
+            def guard():
+                check_window()
+                if (
+                    self._focus_control_stamp(snapshot(), include_bounds=False)
+                    != observed
+                ):
+                    raise ValueError("The focused control changed during text input.")
+                # UIA IPC can wait; the request/window must still own input now.
+                check_window()
+
+            guard()
+            try:
+                self.type_text(text, _guard=guard)
+            except Exception as exc:
+                raise DesktopUnavailableError(
+                    "The guarded desktop text input stopped; its result may be partial. Capture the screen before continuing."
+                ) from exc
+
+    def press_in_window(self, key: str, window_title: str, *, _guard=None) -> None:
         validate_desktop_key(key)
         validate_window_title(window_title)
         window = self._require_foreground(window_title)
         self._require_foreground(window_title, identity=self._window_identity(window))
+        if _guard is not None:
+            _guard()
         try:
             self.press(key)
         except Exception:
@@ -704,10 +878,28 @@ class DesktopController:
                 self._backend.platformModule._mouseUp(x, y, button)
             raise
 
-    def type_text(self, text: str) -> None:
+    def type_text(self, text: str, *, _guard=None) -> None:
         clean = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]", "", text or "")
-        self.input_guard()
-        self._backend.write(clean, interval=0.0)
+
+        def guard():
+            self.input_guard()
+            if _guard is not None:
+                _guard()
+
+        if self._is_windows_backend():
+            # Keep PyAutoGUI's corner abort enabled, while avoiding its ASCII-only writer.
+            def native_guard():
+                self._backend.failSafeCheck()
+                guard()
+
+            _send_unicode_text_win32(clean, native_guard)
+        elif _guard is not None:
+            for character in clean:
+                guard()
+                self._backend.write(character, interval=0.0)
+        else:
+            guard()
+            self._backend.write(clean, interval=0.0)
 
     def press(self, key: str) -> None:
         clean = (key or "").strip().lower()

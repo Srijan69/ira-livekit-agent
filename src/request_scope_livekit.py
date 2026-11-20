@@ -130,6 +130,8 @@ class RequestScopeTools:
         self._completed_calls = OrderedDict()
         self._binding_changed = asyncio.Event()
         self._closed = False
+        self._available_tools = set()
+        self._retry_requests = OrderedDict()
 
     def bind_speech(self, speech_handle, request):
         if self._closed:
@@ -196,6 +198,41 @@ class RequestScopeTools:
         if not report or len(report) > 16000:
             return
         self._reviewed.add(handle.id)
+        from execution_continuation import (
+            CONTINUATION_INSTRUCTIONS,
+            needs_tool_continuation,
+        )
+
+        try:
+            self.scope.require(request.id)
+        except ScopeViolation:
+            return
+        if needs_tool_continuation(
+            request.text, report, self.scope.history, self._available_tools
+        ):
+            if self._session is not None and request.id not in self._retry_requests:
+                # No await between identity check and dispatch. Bind the returned
+                # SDK handle to that same request, never synthesize human input.
+                self._retry_requests[request.id] = None
+                while len(self._retry_requests) > 256:
+                    self._retry_requests.popitem(last=False)
+                try:
+                    next_handle = self._session.generate_reply(
+                        instructions=CONTINUATION_INSTRUCTIONS,
+                        tool_choice="auto",
+                    )
+                    self.bind_speech(next_handle, request)
+                    self._speech_epochs[next_handle.id] = request.epoch
+                    logger.info(
+                        "no_tool_continuation request_id=%s speech_id=%s",
+                        request.id,
+                        handle.id,
+                    )
+                except RuntimeError:
+                    logger.warning("Could not continue current request %s", request.id)
+            # An exhausted acknowledgment remains unfinished, never closed as
+            # success by the default no-judge admission mode.
+            return
         revision = self._activity_revision
         try:
             await self.scope.assess_completion(request.id, report, self._metadata())
@@ -356,6 +393,8 @@ class RequestScopeTools:
                 _outer_actions.reset(outer_token)
 
     def wrap_tools(self, tools):
+        tools = list(tools)
+        self._available_tools.update(tool.info.name for tool in tools)
         wrapped = []
         for tool in tools:
             if not isinstance(tool, (FunctionTool, RawFunctionTool)):

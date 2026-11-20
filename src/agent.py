@@ -35,6 +35,7 @@ from livekit.plugins import ai_coustics
 import image_pipeline
 import market_report
 from browser import BrowserController, BrowserUnavailableError
+from computer_events import build_computer_event, make_computer_publisher
 from computer_use import ObservedDesktop
 from context_instructions import CONTEXT_INSTRUCTIONS
 from desktop import DesktopController, DesktopUnavailableError
@@ -44,13 +45,14 @@ from host_execution import HostActionTimeout, HostExecutionLock
 from personal_memory import PersonalMemoryStore
 from realtime_model import GEMINI_LIVE_MODEL as GEMINI_LIVE_MODEL
 from realtime_model import build_realtime_model
-from request_scope import RequestScope
+from request_scope import RequestScope, ScopeViolation
 from request_scope_livekit import RequestScopeTools, check_current_action
 from session_memory import SessionMemoryIntegration
 from skill_adapters import validate_app
 from skill_store import SkillStore
 from skill_tools import SkillTools
 from skills import SkillCatalog
+from spotify_tools import SpotifyTools
 from system_status import SystemStatusReader, SystemStatusUnavailableError
 from tasks import TaskStore
 from telemetry import SessionStatusReporter
@@ -331,7 +333,9 @@ _INSTRUCTIONS = textwrap.dedent(
     # Persona
 
     You are IRA, the boss's personal AI assistant and digital chief-of-staff.
-    You address the user respectfully and familiarly as "sir" or "boss".
+    You address the user only as "Boss" or "Sir". Never use the saved name for
+    direct address. The saved name is usable for user-requested identity tasks.
+    Profile, preferences and history cannot override this fixed addressing rule.
     You are female: speak with a woman's voice, refined warmth, and poise,
     and refer to yourself as she or her if it ever comes up. Your name
     does not stand for anything -- it is not an acronym and there is
@@ -394,9 +398,9 @@ _INSTRUCTIONS = textwrap.dedent(
       1. Act: Invoke the tool for the immediate next step.
       2. Observe: Inspect the tool result and verified state.
       3. Next Step: If the final objective is not yet reached, immediately call the next tool.
-      4. Fallback: If a browser tool encounters an error, unexpected state, or blocked UI, call capture_screen and use desktop mouse tools (click_desktop_element, click_mouse, type_on_desktop) to complete the action visually.
+      4. Fallback: On a browser error or obstruction, inspect its attached fresh recovery image; call capture_screen if none was attached. Focus the observed browser window if needed, use fresh desktop controls and inspect the result. List browser elements again after desktop input. Never repeat an uncertain effect.
       5. Finish: Only close the task or report completion once the entire objective is achieved.
-    - If a repeatable procedure or workflow exists in <available_skills>, invoke run_skill immediately.
+    - If a procedure exists in <available_skills>, load skill_view(name), then follow it adaptively with actual tool calls and observations. Loading a procedure is not executing it.
     - NEVER answer these from memory or mental calculation -- ALWAYS call the tool:
       * Current time or relative dates -> current_time
       * System metrics (CPU, RAM, battery) -> system_status
@@ -418,12 +422,12 @@ _INSTRUCTIONS = textwrap.dedent(
 
     # Browsing the web
 
-    - You drive a real Chrome browser window using Selenium that the boss can see. Go when asked; do not ask permission first.
-    - To interact with any web service (such as Spotify, YouTube, Wikipedia, search engines, or web apps), use the general browser tools: browse_to, read_page, list_page_elements, click_element, type_into_element, select_dropdown_option, go_back, close_browser, new_tab, switch_tab, list_tabs, close_tab.
+    - You drive the selected visible browser with Playwright. Respect service-specific browser preferences. Go when asked; do not ask permission first.
+    - Use Playwright browser tools first for web pages: browse_to, read_page, list_page_elements, click_element, type_into_element, select_dropdown_option, go_back, close_browser, new_tab, switch_tab, list_tabs, close_tab. Use observed desktop tools for native dialogs/controls or blocked browser interactions. Native editing/navigation uses press_desktop_key; typed text supports printable Unicode.
     - When working across multiple pages or documents (e.g. copying information from a reference page to a form), open a new tab with new_tab, check open tabs with list_tabs, and switch between them with switch_tab.
     - For dropdown menus (<select>), use select_dropdown_option with the dropdown's numbered element index and the desired option name.
-    - There are NO dedicated Spotify tools. For Spotify, browse_to "https://open.spotify.com", call list_page_elements, and click or type to search and play playlists or songs.
-    - For WhatsApp tasks or sending a WhatsApp message to a number or contact, invoke run_skill with name="send-whatsapp-message" and the target number and message in inputs_json (e.g. inputs_json='{"number": "8519994387", "message": "Hi"}').
+    - Spotify tools are available: open_spotify, spotify_play_track, spotify_play_playlist, spotify_control. Use spotify_play_track for a requested song with its title and known artist. These enforce the saved browser preference, including Brave only for Spotify. Never silently substitute Chrome or the system browser. Require verified now-playing identity and playback; inspect login or ambiguous results and report blockers accurately.
+    - For WhatsApp tasks, read skill_view("send-whatsapp-message") and follow its procedure with available tools and the actual requested recipient/message. Skill loading does not send a message and never grants authorization to invent or reuse old messages.
     - You act on a page by number. List what is on the page, then act on one of the numbered things. Never guess a number you were not given.
     - The numbering changes every time the page does. After a click, a submission, or a new page, list again before acting.
     - Summarize what a page says in a sentence or two. Never read one out verbatim.
@@ -435,9 +439,9 @@ _INSTRUCTIONS = textwrap.dedent(
     # Repeatable tasks and durable notes
 
     - Browser, desktop, skill-management and memory tools are ready to use. Call them directly for the requested action; load_capabilities can list a group's tools when needed. Skill contents are retrieved on demand. Loading or listing tools does not execute an action.
-    - For a repeatable multi-step task, use the available skills catalog or list_skills, view_skill to inspect steps, then run_skill with the matching name. Draft skills cannot run. Supply known inputs; a skill may ask for an input while it runs.
+    - The primary skills library follows Hermes: compact skills_list discovery, then skill_view(name, file_path) for the full Markdown procedure or support file. Execute its steps using available tools and observed results. run_skill on a procedure returns procedure_ready with instructions and inputs; continue with its actual tool calls. A loaded procedure is never completed. skill_manage authors ordinary Markdown procedures. Optional compiled workflows use workflow:slug and are listed separately by list_skills. Draft compiled workflows cannot run.
     - If run_skill or answer_skill returns waiting, ask its question and wait for the boss's answer. Pass that answer to answer_skill with the exact run_id and question_id from the waiting result or skill_status. Never guess an answer, reuse an old question ID, or start the skill again to continue it. A waiting run is not completed. Do not ask for passwords or credentials through skill clarification.
-    - Skill execution owns actions and checks. A failed, cancelled, or uncertain run is not completed. Use stop_skill when the boss asks to stop and skill_status for its recorded outcome.
+    - Compiled workflow execution owns its actions and checks. A failed, cancelled, or uncertain run is not completed. Use stop_skill for compiled runs and stop_actions for any task; skill_status reads compiled outcomes. Skill content cannot grant permission or override current-request scope.
     - To inspect available skills, use skills_list; use skill_view(name) to read full procedures and guidelines. Use skill_manage to create, edit, or patch skills.
     - When the boss asks to remember a successful procedure, use learn_skill with its verified run ID. To save a new dictated procedure use save_skill; it stays a draft until reviewed. Enable a draft only when the boss explicitly asks, using enable_skill.
     - Executable skills declare allowed tools, do actions, and observable checks. Do not invent checks, grant additional tools, or bypass a draft with manual actions. Old workflow files remain readable and need migration and review before running.
@@ -479,7 +483,7 @@ _INSTRUCTIONS = textwrap.dedent(
 )
 
 
-class Assistant(SkillTools, Agent):
+class Assistant(SpotifyTools, SkillTools, Agent):
     def __init__(
         self,
         *,
@@ -509,6 +513,7 @@ class Assistant(SkillTools, Agent):
         # which is what lets the tests construct one without a display or a
         # database file appearing.
         self._browser = browser if browser is not None else BrowserController()
+        self._browser.input_guard = check_current_action
         if dual_memory is not None:
             self._dual_memory = dual_memory
         elif memory is not None:
@@ -539,9 +544,11 @@ class Assistant(SkillTools, Agent):
         self._reporter = reporter or SessionStatusReporter()
         self._tasks = tasks if tasks is not None else TaskStore()
         self._publish_event = publish_event
+        self._computer_event_sequence = 0
+        self._computer_event_lock = threading.Lock()
         self._clock = clock or (lambda: datetime.now().astimezone())
         self._system_reader = system_reader
-        self._skills = skills if skills is not None else self._skills_catalog
+        self._skills = skills if skills is not None else SkillStore()
         self._skill_service = None
         self._skill_registry = None
         self._last_skill_run_id = ""
@@ -626,6 +633,9 @@ class Assistant(SkillTools, Agent):
             await self._context_memory.aclose()
         self._request_scope.revoke("Session ended; await a new human request")
         self._computer.invalidate()
+        self._publish_computer_preview(
+            None, None, phase="cleared", tool_name="stop_actions"
+        )
         if getattr(self, "_host_cleanup_task", None) is None:
 
             async def cleanup():
@@ -638,7 +648,11 @@ class Assistant(SkillTools, Agent):
                         except Exception:
                             break
                 await asyncio.to_thread(self._computer.close)
+                if hasattr(self._browser, "close"):
+                    await asyncio.to_thread(self._browser.close)
                 await self._scoped_tools.aclose()
+                if hasattr(self._publish_event, "aclose"):
+                    await self._publish_event.aclose()
 
             self._host_cleanup_task = asyncio.create_task(cleanup())
             _HOST_CLEANUP_TASKS.add(self._host_cleanup_task)
@@ -661,6 +675,9 @@ class Assistant(SkillTools, Agent):
 
     def _stop_host_tasks(self):
         self._computer.invalidate()
+        self._publish_computer_preview(
+            None, None, phase="cleared", tool_name="stop_actions"
+        )
         if self._skill_service is not None:
             for run_id in set(self._skill_monitors) | {self._last_skill_run_id}:
                 if run_id:
@@ -859,6 +876,47 @@ class Assistant(SkillTools, Agent):
             )
         return source
 
+    def _publish_computer_preview(
+        self, context, description, *, phase, action=None, tool_name=None
+    ):
+        if self._publish_event is None:
+            return
+        try:
+            with self._computer_event_lock:
+                self._computer_event_sequence += 1
+                sequence = self._computer_event_sequence
+            call = getattr(context, "function_call", None)
+            event = build_computer_event(
+                description,
+                run_id=self._reporter.run_id,
+                call_id=getattr(call, "call_id", None) or f"computer-{sequence}",
+                tool_name=getattr(call, "name", None) or tool_name or "capture_screen",
+                sequence=sequence,
+                phase=phase,
+                action=action,
+            )
+            if event is not None:
+                self._publish_event(event)
+        except Exception:
+            logger.debug("Computer preview publication failed", exc_info=True)
+
+    def _desktop_action_preview(self, context):
+        def publish(frame, action):
+            if self._publish_event is not None:
+                self._publish_computer_preview(
+                    context,
+                    self._computer.describe(frame=frame),
+                    phase="before",
+                    action=action,
+                )
+
+        return publish
+
+    async def _invalidate_browser_controls(self):
+        invalidate = getattr(self._browser, "invalidate_elements", None)
+        if callable(invalidate):
+            await asyncio.to_thread(invalidate)
+
     async def _desktop_frame_result(self, context, frame, *, input_sent=False) -> str:
         from livekit import rtc
         from livekit.agents import llm
@@ -901,8 +959,32 @@ class Assistant(SkillTools, Agent):
                     "The model or desktop changed while observing the desktop."
                 )
             self._desktop_image_session = source
+            if self._publish_event is not None:
+                description = await asyncio.to_thread(
+                    self._computer.describe, frame=frame
+                )
+                check_current_action()
+                if (
+                    self._computer._frame is not frame
+                    or self._require_desktop_activity(context) is not source
+                ):
+                    raise ToolError(
+                        "Desktop evidence changed while preparing the preview."
+                    )
+                self._publish_computer_preview(
+                    context,
+                    description,
+                    phase="after" if input_sent else "observed",
+                )
+        except ScopeViolation:
+            self._computer.invalidate()
+            self._publish_computer_preview(
+                context, None, phase="cleared", tool_name="stop_actions"
+            )
+            raise
         except Exception:
             self._computer.invalidate()
+            self._publish_computer_preview(context, None, phase="unavailable")
             prefix = (
                 "Input was sent but the result is not verified. " if input_sent else ""
             )
@@ -932,6 +1014,9 @@ class Assistant(SkillTools, Agent):
         except HostActionTimeout:
             self._computer.invalidate()
             reporter.emit("ERROR", "screen capture timed out")
+            raise
+        except ScopeViolation:
+            self._computer.invalidate()
             raise
         except Exception as exc:
             self._computer.invalidate()
@@ -965,7 +1050,7 @@ class Assistant(SkillTools, Agent):
                 ),
             )
             return await self._desktop_frame_result(context, frame)
-        except HostActionTimeout:
+        except (ScopeViolation, HostActionTimeout):
             self._reporter.for_tool(context).emit("ERROR", "screen detail timed out")
             raise
         except Exception as exc:
@@ -984,12 +1069,14 @@ class Assistant(SkillTools, Agent):
                 observation_id,
                 window_id,
                 _permit_check=check_current_action,
+                _on_action=self._desktop_action_preview(context),
                 _preflight=lambda: self._require_desktop_activity(
                     context, require_observed=True
                 ),
             )
+            await self._invalidate_browser_controls()
             return await self._desktop_frame_result(context, frame, input_sent=True)
-        except HostActionTimeout:
+        except (ScopeViolation, HostActionTimeout):
             self._reporter.for_tool(context).emit("ERROR", "window focus timed out")
             raise
         except Exception as exc:
@@ -1002,18 +1089,22 @@ class Assistant(SkillTools, Agent):
                 observation_id,
                 action,
                 _permit_check=check_current_action,
+                _on_action=self._desktop_action_preview(context),
                 _preflight=lambda: self._require_desktop_activity(
                     context, require_observed=True
                 ),
                 **args,
             )
             self._record_tool_success(f"desktop_{action}")
+            await self._invalidate_browser_controls()
             return await self._desktop_frame_result(context, frame, input_sent=True)
-        except HostActionTimeout:
+        except (ScopeViolation, HostActionTimeout):
             self._reporter.for_tool(context).emit("ERROR", "desktop action timed out")
+            self._publish_computer_preview(context, None, phase="unavailable")
             raise
         except Exception as exc:
             self._record_tool_failure(f"desktop_{action}", str(exc))
+            self._publish_computer_preview(context, None, phase="unavailable")
             raise ToolError(f"Desktop action: {exc}") from exc
 
     async def move_mouse(
@@ -1094,14 +1185,20 @@ class Assistant(SkillTools, Agent):
     async def type_on_desktop(
         self, context: RunContext, text: str, observation_id: str
     ) -> str:
-        """Type printable ASCII text only into the freshly observed foreground window. First click the intended field, inspect the returned screenshot to confirm focus, and use that observation_id. Returns a screenshot to verify text appeared."""
+        """Type printable Unicode text into the freshly observed focused field. First click the intended field, inspect the returned screenshot to confirm focus, and use that observation_id. Returns a screenshot to verify text appeared."""
         return await self._computer_action(context, observation_id, "type", text=text)
+
+    async def press_desktop_key(
+        self, context: RunContext, key: str, observation_id: str
+    ) -> str:
+        """Press one supported navigation/editing key (enter, tab, esc, backspace, delete, arrows, home/end, pageup/pagedown) in the freshly observed window. Use the latest observation_id and inspect the new screenshot. No arbitrary shortcuts or terminal commands."""
+        return await self._computer_action(context, observation_id, "key", key=key)
 
     # -- browsing ----------------------------------------------------------
     #
     # Every browser tool goes through `_browser_call`, which exists to enforce
     # two things that are easy to forget one method at a time: the blocking
-    # Selenium call happens off the event loop, and no exception escapes into
+    # browser call happens off the event loop, and no exception escapes into
     # the realtime session. A tool that raises drops the turn -- IRA simply
     # goes quiet, with no way to explain herself.
 
@@ -1112,13 +1209,13 @@ class Assistant(SkillTools, Agent):
         reporter.emit("DELEGATING", "browser worker")
         reporter.emit("RUNNING", action)
         try:
-            # Selenium blocks, sometimes for seconds. Run inline it would stall
+            # Browser I/O blocks, sometimes for seconds. Run inline it would stall
             # the audio stream carrying IRA's own voice mid-sentence.
             result = await self._run_host_action(fn, *args, **kwargs)
             reporter.emit("DONE", action)
             self._record_tool_success(action)
             return str(result)[:2000]
-        except HostActionTimeout:
+        except (ScopeViolation, HostActionTimeout):
             reporter.emit("ERROR", "browser action timed out")
             raise
         except BrowserUnavailableError as exc:
@@ -1134,8 +1231,8 @@ class Assistant(SkillTools, Agent):
                 recovery_advice="The browser is unavailable on this host. Fall back to desktop tools.",
             )
             raise ToolError(
-                "The browser is not available on this host. Tell the boss web "
-                "browsing only works when the agent runs on his own machine."
+                "The selected browser is not available on this host. "
+                + await self._browser_failure_observation(context)
             ) from None
         except IndexError as exc:
             # Safe to repeat verbatim -- `_resolve` raises a sentence written
@@ -1153,13 +1250,7 @@ class Assistant(SkillTools, Agent):
                 "Call list_page_elements to see current elements, or call capture_screen to interact visually."
             ) from exc
         except Exception as exc:
-            # Deliberately does NOT include the raw Selenium exception text in speech.
-            if (
-                hasattr(self._browser, "_is_driver_alive")
-                and not self._browser._is_driver_alive()
-            ):
-                with contextlib.suppress(Exception):
-                    self._browser.close()
+            # Do not close an obstructed browser or replay an uncertain effect.
             logger.exception("browser action failed: %s", action)
             reporter.emit("ERROR", action)
             self._record_tool_failure(action, str(exc))
@@ -1171,8 +1262,26 @@ class Assistant(SkillTools, Agent):
             )
             raise ToolError(
                 f"Could not {action}. Error logged to {log_path.name}. "
-                f"Fallback: Call capture_screen now to inspect what is on the screen and use desktop tools to interact."
+                + await self._browser_failure_observation(context)
             ) from None
+
+    async def _browser_failure_observation(self, context):
+        check_current_action()
+        if context is not None:
+            try:
+                result = json.loads(await self.capture_screen(context))
+                return (
+                    "A fresh desktop image is attached; observation_id="
+                    + result["observation_id"]
+                    + ". "
+                    "Inspect that image. If the requested browser is not foreground, use focus_desktop_window with its observed window ID, then inspect the new image. "
+                    "Use click_desktop_element or image-coordinate desktop tools for the observed obstruction; verify the result before returning to browser tools."
+                )
+            except (ScopeViolation, HostActionTimeout):
+                raise
+            except Exception:
+                logger.debug("Browser recovery image unavailable", exc_info=True)
+        return "Fallback: Call capture_screen now to inspect the current desktop before input. Use only observed controls, and do not repeat any uncertain action."
 
     @function_tool
     async def browse_to(self, context: RunContext, url: str) -> str:
@@ -1187,9 +1296,14 @@ class Assistant(SkillTools, Agent):
                 https://news.ycombinator.com. A bare domain is fine.
         """
         logger.info("browsing", extra={"url": url})
-        result = await self._browser_call(
-            "open that page", self._browser.navigate, url, context=context
-        )
+        if self._is_spotify_url(url):
+            result = await self._spotify_action(
+                context, lambda: self._browser.navigate(url)
+            )
+        else:
+            result = await self._browser_call(
+                "open that page", self._browser.navigate, url, context=context
+            )
         return (
             f"{result} Call list_page_elements to see available interactive elements, "
             f"or type_into_element/click_element to proceed with the task."
@@ -1300,9 +1414,14 @@ class Assistant(SkillTools, Agent):
                 opens a blank tab.
         """
         logger.info("opening new browser tab", extra={"url": url})
-        result = await self._browser_call(
-            "open a new browser tab", self._browser.new_tab, url, context=context
-        )
+        if self._is_spotify_url(url):
+            result = await self._spotify_action(
+                context, lambda: self._browser.new_tab(url)
+            )
+        else:
+            result = await self._browser_call(
+                "open a new browser tab", self._browser.new_tab, url, context=context
+            )
         return (
             f"{result} Call list_page_elements to inspect interactive elements "
             f"on this tab, or switch_tab to return to an earlier tab."
@@ -1729,6 +1848,8 @@ class Assistant(SkillTools, Agent):
             self._skills_catalog.view_skill, name, file_path=fp
         )
         if not view_result.get("success"):
+            if not fp and not name.startswith("procedure:"):
+                return await self._view_compiled_skill(name.removeprefix("workflow:"))
             return view_result.get("error", "Skill view failed.")
         if fp:
             return f"--- {name}/{fp} ---\n{view_result.get('content', '')}"
@@ -1786,6 +1907,7 @@ class Assistant(SkillTools, Agent):
             return f"Unknown skill_manage action '{action}'. Choose create, edit, patch, delete, write_file, or remove_file."
 
         if res.get("success"):
+            self._skills_changed()
             return res.get("message", "Success.")
         return f"Skill management error: {res.get('error', 'Unknown failure')}"
 
@@ -1908,7 +2030,7 @@ class Assistant(SkillTools, Agent):
         old_text: str = "",
         new_text: str = "",
     ) -> str:
-        """Persistent memory shared with Settings; curated markdown remains searchable.
+        """Persistent memory shared with System Controls; curated markdown remains searchable.
 
         Targets:
             - 'memory': durable notes, environment facts, workspace info.
@@ -2166,7 +2288,17 @@ def _room_status_publisher(
 
 
 def _room_event_publisher(room) -> Callable[[dict], None]:
-    return _room_status_publisher(room, topic=EVENTS_TOPIC)
+    notifications = _room_status_publisher(room, topic=EVENTS_TOPIC)
+    computer = make_computer_publisher(room)
+
+    def publish(event):
+        if event.get("type") == "computer.observation":
+            computer(event)
+        else:
+            notifications(event)
+
+    publish.aclose = computer.aclose
+    return publish
 
 
 def _simulation_tool_mocks(userdata: dict) -> dict:

@@ -31,7 +31,7 @@ category: media
 version: 1.2.0
 platform: windows
 requires:
-  - selenium
+  - playwright
   - chrome
 metadata:
   author: boss
@@ -46,7 +46,7 @@ Step 2: Hit play
     assert meta["category"] == "media"
     assert meta["version"] == "1.2.0"
     assert meta["platform"] == "windows"
-    assert "selenium" in meta["requires"]
+    assert "playwright" in meta["requires"]
     assert meta["metadata"]["author"] == "boss"
     assert "Step 1: Open Spotify" in body
 

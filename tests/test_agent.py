@@ -691,15 +691,16 @@ async def test_capture_screen_reports_actual_foreground_and_image_size(
     )
 
 
-def test_dedicated_spotify_tools_removed_and_selenium_tools_registered() -> None:
+def test_spotify_and_general_playwright_tools_are_registered() -> None:
     assistant = Assistant()
     tool_names = {tool.info.name for tool in assistant.tools}
-    # Dedicated Spotify tools must not be registered
-    assert "open_spotify" not in tool_names
-    assert "spotify_control" not in tool_names
-    assert "spotify_play_playlist" not in tool_names
-    assert "spotify_play_track" not in tool_names
-    # General Selenium browser tools must be registered
+    assert {
+        "open_spotify",
+        "spotify_control",
+        "spotify_play_playlist",
+        "spotify_play_track",
+    } <= tool_names
+    # General Playwright browser tools must be registered
     assert {
         "browse_to",
         "read_page",

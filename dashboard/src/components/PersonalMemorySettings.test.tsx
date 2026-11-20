@@ -16,7 +16,7 @@ import type {
 } from "@shared/types";
 
 import { usePersonalMemory } from "@/hooks/usePersonalMemory";
-import { Settings } from "./Settings";
+import { SystemControls } from "./SystemControls";
 import { Sidebar } from "./Sidebar";
 
 const emptyProfile: UserProfile = {
@@ -134,16 +134,11 @@ function Harness({ api }: { api?: PersonalMemoryApi }) {
   return (
     <>
       <Sidebar
-        active="settings"
+        active="system"
         onSelect={() => {}}
         profile={personalMemory.profile}
       />
-      <Settings
-        activeTheme="blue"
-        onSelect={() => {}}
-        error={null}
-        personalMemory={personalMemory}
-      />
+      <SystemControls personalMemory={personalMemory} />
     </>
   );
 }
@@ -192,6 +187,21 @@ describe("Your Profile", () => {
     fireEvent.change(screen.getByLabelText("Preferences"), {
       target: { value: "Keep examples practical" },
     });
+    fireEvent.change(screen.getByLabelText("Location"), {
+      target: { value: "Hyderabad, India" },
+    });
+    fireEvent.change(screen.getByLabelText("Languages"), {
+      target: { value: "English, Telugu" },
+    });
+    fireEvent.change(screen.getByLabelText("Interests"), {
+      target: { value: "Astronomy and building useful tools" },
+    });
+    fireEvent.change(screen.getByLabelText("Goals"), {
+      target: { value: "Finish my engineering degree" },
+    });
+    fireEvent.change(screen.getByLabelText("About me"), {
+      target: { value: "I study engineering and help with the family business." },
+    });
     fireEvent.click(screen.getByRole("button", { name: "Save profile" }));
     await screen.findByText(/profile saved/i);
     expect(received).toEqual({
@@ -199,6 +209,11 @@ describe("Your Profile", () => {
       age: 0,
       occupation: "",
       preferences: "Keep examples practical",
+      location: "Hyderabad, India",
+      languages: "English, Telugu",
+      interests: "Astronomy and building useful tools",
+      goals: "Finish my engineering degree",
+      about_me: "I study engineering and help with the family business.",
       expected_revision: 2,
     });
     expect(
@@ -213,6 +228,64 @@ describe("Your Profile", () => {
     fireEvent.click(screen.getByRole("button", { name: "Save profile" }));
     await waitFor(() => expect(received?.age).toBeNull());
   });
+
+  it("starts older profiles with empty expanded fields and hydrates saved background", async () => {
+    const { api, updateProfile } = fixture();
+    await openProfile(api);
+    for (const label of ["Location", "Languages", "Interests", "Goals", "About me"])
+      expect(screen.getByLabelText(label)).toHaveValue("");
+    await act(async () =>
+      updateProfile({
+        ...initialProfile,
+        location: "Pune",
+        languages: "Marathi, English",
+        interests: "Sketching",
+        goals: "Build a portfolio",
+        about_me: "I work as a designer and care for my parents.",
+        revision: 3,
+      }),
+    );
+    expect(screen.getByLabelText("Location")).toHaveValue("Pune");
+    expect(screen.getByLabelText("Languages")).toHaveValue("Marathi, English");
+    expect(screen.getByLabelText("Interests")).toHaveValue("Sketching");
+    expect(screen.getByLabelText("Goals")).toHaveValue("Build a portfolio");
+    expect(screen.getByLabelText("About me")).toHaveValue(
+      "I work as a designer and care for my parents.",
+    );
+  });
+
+  it.each([
+    ["Location", 200, /location.*200/i],
+    ["Languages", 200, /languages.*200/i],
+    ["Interests", 1500, /interests.*1,500/i],
+    ["Goals", 1500, /goals.*1,500/i],
+    ["About me", 4000, /about me.*4,000/i],
+  ] as const)(
+    "rejects an oversized %s and lets the user correct it",
+    async (label, limit, message) => {
+      const { api } = fixture();
+      let received: UserProfileInput | undefined;
+      const save = api.saveProfile;
+      api.saveProfile = async (input) => {
+        received = input;
+        return save(input);
+      };
+      await openProfile(api);
+      const field = screen.getByLabelText(label);
+      fireEvent.change(field, { target: { value: "a".repeat(limit + 1) } });
+      fireEvent.click(screen.getByRole("button", { name: "Save profile" }));
+      expect(screen.getByRole("alert")).toHaveTextContent(message);
+      expect(field).toHaveFocus();
+      expect(field).toHaveAttribute("aria-invalid", "true");
+      expect(field).toHaveAccessibleDescription(message);
+      expect(received).toBeUndefined();
+      fireEvent.change(field, { target: { value: "a".repeat(limit) } });
+      fireEvent.click(screen.getByRole("button", { name: "Save profile" }));
+      await screen.findByText(/profile saved/i);
+      expect(field).toHaveValue("a".repeat(limit));
+      expect(field).toHaveAttribute("aria-invalid", "false");
+    },
+  );
 
   it.each(["-1", "131", "4.5"])(
     "rejects invalid age %s while preserving the form",
@@ -245,24 +318,31 @@ describe("Your Profile", () => {
     fireEvent.change(screen.getByLabelText("Name"), {
       target: { value: "Unsaved name" },
     });
+    fireEvent.change(screen.getByLabelText("About me"), {
+      target: { value: "Unsaved background" },
+    });
     await act(async () =>
       updateProfile({
         ...initialProfile,
         name: "Voice correction",
+        about_me: "Updated background",
         revision: 3,
       }),
     );
     expect(screen.getByLabelText("Name")).toHaveValue("Unsaved name");
+    expect(screen.getByLabelText("About me")).toHaveValue("Unsaved background");
     fireEvent.click(screen.getByRole("button", { name: "Save profile" }));
     expect(await screen.findByRole("alert")).toHaveTextContent(
       /changed elsewhere.*edits.*kept/i,
     );
     expect(revision).toBe(2);
     expect(screen.getByLabelText("Name")).toHaveValue("Unsaved name");
+    expect(screen.getByLabelText("About me")).toHaveValue("Unsaved background");
     fireEvent.click(
       screen.getByRole("button", { name: "Reload saved profile" }),
     );
     expect(screen.getByLabelText("Name")).toHaveValue("Voice correction");
+    expect(screen.getByLabelText("About me")).toHaveValue("Updated background");
   });
 
   it("preserves input on failed save and failed reset, then confirms a separate reset", async () => {
@@ -278,6 +358,10 @@ describe("Your Profile", () => {
     fireEvent.change(screen.getByLabelText("Name"), {
       target: { value: "Kept edit" },
     });
+    for (const label of ["Location", "Languages", "Interests", "Goals", "About me"])
+      fireEvent.change(screen.getByLabelText(label), {
+        target: { value: `Kept ${label.toLowerCase()}` },
+      });
     fireEvent.click(screen.getByRole("button", { name: "Save profile" }));
     expect(await screen.findByRole("alert")).toHaveTextContent(
       /could not save.*try again/i,
@@ -287,6 +371,7 @@ describe("Your Profile", () => {
     );
     fireEvent.click(screen.getByRole("button", { name: "Reset profile" }));
     expect(screen.getByLabelText("Name")).toHaveValue("Kept edit");
+    expect(screen.getByLabelText("About me")).toHaveValue("Kept about me");
     fireEvent.click(
       screen.getByRole("button", { name: "Confirm reset profile" }),
     );
@@ -294,6 +379,7 @@ describe("Your Profile", () => {
       expect(screen.getByRole("alert")).toHaveTextContent(/could not reset/i),
     );
     expect(screen.getByLabelText("Name")).toHaveValue("Kept edit");
+    expect(screen.getByLabelText("About me")).toHaveValue("Kept about me");
     api.resetProfile = reset;
     fireEvent.click(
       screen.getByRole("button", { name: "Confirm reset profile" }),
@@ -301,6 +387,8 @@ describe("Your Profile", () => {
     await screen.findByText(/profile reset/i);
     expect(screen.getByLabelText("Name")).toHaveValue("");
     expect(screen.getByLabelText("Age (optional)")).toHaveValue(null);
+    for (const label of ["Location", "Languages", "Interests", "Goals", "About me"])
+      expect(screen.getByLabelText(label)).toHaveValue("");
     expect(
       within(screen.getByRole("navigation")).getByText("Your profile"),
     ).toBeVisible();

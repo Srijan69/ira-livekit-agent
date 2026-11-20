@@ -73,22 +73,20 @@ describe("Settings themes", () => {
     expect(screen.getByRole("heading", { name: "Themes" })).toBeInTheDocument();
   });
 
-  it("includes profile and memory tabs in the keyboard navigation", () => {
+  it("keeps settings focused on appearance and connection with keyboard navigation", () => {
     render(<Settings activeTheme="blue" onSelect={vi.fn()} error={null} />);
     const first = screen.getByRole("tab", { name: "Personalization" });
     fireEvent.keyDown(first, { key: "End" });
-    const memory = screen.getByRole("tab", { name: "Memory and Context" });
-    expect(memory).toHaveFocus();
-    expect(memory).toHaveAttribute("aria-selected", "true");
-    fireEvent.keyDown(memory, { key: "ArrowLeft" });
-    const profile = screen.getByRole("tab", { name: "Your Profile" });
-    expect(profile).toHaveFocus();
-    expect(
-      screen.getByRole("heading", { name: "Your Profile" }),
-    ).toBeInTheDocument();
-    fireEvent.keyDown(profile, { key: "Home" });
+    const connection = screen.getByRole("tab", { name: "Connection and Keys" });
+    expect(connection).toHaveFocus();
+    expect(connection).toHaveAttribute("aria-selected", "true");
+    fireEvent.keyDown(connection, { key: "ArrowLeft" });
+    expect(first).toHaveFocus();
+    expect(screen.getByRole("heading", { name: "Themes" })).toBeInTheDocument();
     fireEvent.keyDown(first, { key: "ArrowLeft" });
-    expect(memory).toHaveFocus();
+    expect(connection).toHaveFocus();
+    expect(screen.queryByRole("tab", { name: "Your Profile" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("tab", { name: "Memory and Context" })).not.toBeInTheDocument();
   });
 });
 
@@ -334,7 +332,8 @@ describe("Settings connections", () => {
     expect(screen.getByLabelText("Google API key")).toHaveValue(
       "google-test-key",
     );
-    expect(screen.getByLabelText("Google API key")).toHaveFocus();
+    // The alert DOM can be observed before React runs the passive focus effect.
+    await waitFor(() => expect(screen.getByLabelText("Google API key")).toHaveFocus());
     fireEvent.change(screen.getByLabelText("Google API key"), {
       target: { value: "corrected-test-key" },
     });
@@ -345,6 +344,19 @@ describe("Settings connections", () => {
     expect(
       screen.getByRole("button", { name: "Save and validate" }),
     ).toBeEnabled();
+  });
+
+  it("focuses a provider error after an immediately resolved save", async () => {
+    openConnections({ get: async () => freshSettings, save: async () => ({ error: "Google rejected this key.", field: "googleApiKey" }), onChanged: () => () => {} });
+    await waitFor(() => expect(screen.getByRole("button", { name: "Save and validate" })).toBeEnabled());
+    enterConnections();
+    // Flush the immediate response and its focus effect in one outer async act.
+    await act(async () => {
+      fireEvent.submit(screen.getByRole("form", { name: "Connection and Keys" }));
+      await Promise.resolve();
+    });
+    expect(screen.getByRole("alert")).toHaveTextContent("Google rejected this key.");
+    expect(screen.getByLabelText("Google API key")).toHaveFocus();
   });
 
   it("offers a retry after metadata loading fails", async () => {

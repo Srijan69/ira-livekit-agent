@@ -284,6 +284,7 @@ export function Skills({
             </p>
           )}
           {skills.map((skill) => {
+            const procedural = skill.mode === "procedure";
             const waiting = runs.some(
               (run) => run.skill_slug === skill.slug && run.status === "waiting",
             );
@@ -299,7 +300,7 @@ export function Skills({
             const runnable =
               connected &&
               !skill.archived &&
-              skill.state === "enabled" &&
+              (procedural ? skill.state === "ready" : skill.state === "enabled") &&
               skill.executable !== false &&
               !skill.issues?.length &&
               !waiting &&
@@ -313,14 +314,14 @@ export function Skills({
                   <Activity size={18} />
                   <h2>{skill.name}</h2>
                   <span className="skill-state">
-                    {skill.archived ? "Archived" : titleCase(skill.state)}
+                    {skill.archived ? "Archived" : procedural ? "Procedure" : titleCase(skill.state)}
                   </span>
                 </div>
                 <p>{skill.description}</p>
                 <div className="skill-meta">
                   <span>Version {skill.version}</span>
-                  <span>{skill.use_count} runs</span>
-                  <span>{skill.failure_count} failures</span>
+                  {!procedural && <span>{skill.use_count} runs</span>}
+                  {!procedural && <span>{skill.failure_count} failures</span>}
                   {skill.pinned && <span>Pinned</span>}
                 </div>
                 {skill.state === "draft" && (
@@ -364,8 +365,10 @@ export function Skills({
                       aria-label={`Run ${skill.name}`}
                       onClick={() =>
                         send(
-                          `Run the saved skill ${JSON.stringify(skill.slug)}.`,
-                          "Sent to IRA. Waiting for the run to start.",
+                          procedural
+                            ? `Use the skill ${JSON.stringify(skill.procedure_name)} to complete its task. Read its instructions and ask me for any missing inputs.`
+                            : `Run the saved skill ${JSON.stringify(skill.mode === "compiled" ? `workflow:${skill.slug}` : skill.slug)}.`,
+                          "Sent to IRA. Waiting for the task to start.",
                         )
                       }
                     >
@@ -379,15 +382,15 @@ export function Skills({
                   >
                     <FileText size={13} /> Details
                   </button>
-                  <button
+                  {!procedural && <button
                     className="skill-button"
                     disabled={pending !== null || skill.archived}
                     aria-label={`${skill.pinned ? "Unpin" : "Pin"} ${skill.name}`}
                     onClick={() => void change(skill, "pin")}
                   >
                     <Pin size={13} /> {skill.pinned ? "Unpin" : "Pin"}
-                  </button>
-                  <button
+                  </button>}
+                  {!procedural && <button
                     className="skill-button"
                     disabled={pending !== null || Boolean(running) || waiting}
                     aria-label={`${skill.archived ? "Restore" : "Archive"} ${skill.name}`}
@@ -401,7 +404,7 @@ export function Skills({
                       <Archive size={13} />
                     )}
                     {skill.archived ? "Restore" : "Archive"}
-                  </button>
+                  </button>}
                 </div>
               </article>
             );
@@ -423,9 +426,9 @@ export function Skills({
                   Close details
                 </button>
               </div>
-              <p>Versions: {detail.versions.join(", ")}</p>
+              {detail.mode !== "procedure" && <p>Versions: {detail.versions.join(", ")}</p>}
               <div className="skill-actions">
-                <label>
+                {detail.mode !== "procedure" && <label>
                   Inspect version{" "}
                   <select
                     aria-label="Skill version"
@@ -440,8 +443,8 @@ export function Skills({
                       </option>
                     ))}
                   </select>
-                </label>
-                {!detail.archived && detail.state !== "enabled" && (
+                </label>}
+                {detail.mode !== "procedure" && !detail.archived && detail.state !== "enabled" && (
                   <button
                     className="skill-button skill-primary"
                     disabled={!connected || Boolean(detail.issues?.length)}

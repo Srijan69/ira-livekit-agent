@@ -210,6 +210,11 @@ class SkillCatalog:
 
         # Search for all SKILL.md files
         for skill_md in self.root.rglob("SKILL.md"):
+            if not skill_md.resolve().is_relative_to(self.root) or any(
+                part in SUPPORT_DIRS
+                for part in skill_md.relative_to(self.root).parts[:-1]
+            ):
+                continue
             info = self._parse_skill_file(skill_md)
             if info is None:
                 continue
@@ -227,17 +232,20 @@ class SkillCatalog:
     def get_skill(self, name: str) -> SkillInfo | None:
         """Find a skill by name or slug."""
         target = name.strip().lower()
-        for s in self.list_skills():
-            if s.name.lower() == target:
-                return s
-
-        # Try matching direct folder relative to root
-        direct = self.root / name / "SKILL.md"
-        if direct.exists():
-            return self._parse_skill_file(direct)
-
-        # Tolerant search: substring match if unambiguous
-        matches = [s for s in self.list_skills() if target in s.name.lower()]
+        target = target.removeprefix("procedure:").replace("\\", "/")
+        if not target or ".." in target.split("/") or Path(target).is_absolute():
+            return None
+        available = self.list_skills()
+        matches = [
+            s
+            for s in available
+            if s.name.lower() == target
+            or s.path.parent.relative_to(self.root).as_posix().lower() == target
+        ]
+        if matches:
+            return matches[0] if len(matches) == 1 else None
+        # Tolerant search only through already-filtered, contained packages.
+        matches = [s for s in available if target in s.name.lower()]
         if len(matches) == 1:
             return matches[0]
 
@@ -321,6 +329,9 @@ class SkillCatalog:
             return ""
 
         lines = [f"- {s.name} ({s.category}): {s.description}" for s in skills]
+        lines.append(
+            "Load with skill_view(name); follow the returned procedure using available tools. Reading a skill does not execute it."
+        )
         return "\n<available_skills>\n" + "\n".join(lines) + "\n</available_skills>\n"
 
     # --- Authoring & Management ---

@@ -90,6 +90,25 @@ const activeRun: ExecutionActivity = {
 };
 
 describe("skills page", () => {
+  it("qualifies compiled workflows so matching procedure names cannot collide", async () => {
+    const sent = vi.fn();
+    render(<Skills api={setupApi([{ ...ready, mode: "compiled" }])} connected onSend={sent} activities={[]} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Run Open Notes" }));
+    expect(sent).toHaveBeenCalledWith('Run the saved skill "workflow:notes".');
+  });
+  it("runs a procedural skill by its canonical name and hides compiled controls", async () => {
+    const procedure = { ...ready, slug: "procedure-123", name: "Play Spotify", mode: "procedure" as const, procedure_name: "procedure:media/play-spotify", state: "ready", version: "1.0.0" };
+    const api = setupApi([procedure]);
+    api.detail = async () => ({ skill: { ...procedure, markdown: "Read and follow these instructions", versions: [] } });
+    const sent = vi.fn();
+    render(<Skills api={api} connected onSend={sent} activities={[]} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Run Play Spotify" }));
+    expect(sent).toHaveBeenCalledWith(expect.stringContaining("procedure:media/play-spotify"));
+    expect(screen.queryByRole("button", { name: "Archive Play Spotify" })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Details for Play Spotify" }));
+    expect(await screen.findByText("Read and follow these instructions")).toBeInTheDocument();
+    expect(screen.queryByRole("combobox", { name: "Skill version" })).not.toBeInTheDocument();
+  });
   it("requires an explicit enable request for drafts and exposes review suggestions", async () => {
     const api = setupApi([{ ...ready, state: "draft", executable: false }]);
     api.suggestions = async () => ({

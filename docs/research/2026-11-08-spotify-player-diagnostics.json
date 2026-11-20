@@ -1,0 +1,28 @@
+{
+  "widevine": {
+    "supported": false,
+    "error": "NotSupportedError"
+  },
+  "webdriver": true,
+  "visible_dialogs": [],
+  "login_controls": [],
+  "audio": [],
+  "play_controls": [
+    {
+      "label": "Pause",
+      "disabled": true
+    }
+  ],
+  "progress": "-:--",
+  "exact_rows": [
+    "1\nAaya Sher\nAnirudh Ravichander, Jangi Reddy, Arjun Chandy, Kasarla Shyam\n4:46",
+    "2\nAaya Sher (From \"The Paradise\") (Telugu)\nAnirudh Ravichander, Jangi Reddy, Arjun Chandy, Kasarla Shyam\n4:46"
+  ],
+  "browser": "brave",
+  "config": {
+    "browser": "brave",
+    "user_data_dir": "C:\\Users\\kommi\\AppData\\Local\\IRA\\Browser\\Brave",
+    "profile_directory": "Default"
+  },
+  "console_categories": []
+}

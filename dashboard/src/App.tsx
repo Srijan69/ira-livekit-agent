@@ -11,6 +11,7 @@ import { Stage } from "./components/Stage";
 import { SuggestionChips } from "./components/SuggestionChips";
 import { StatusBanner } from "./components/StatusBanner";
 import { SystemStatus } from "./components/SystemStatus";
+import { SystemControls } from "./components/SystemControls";
 import { TopBar } from "./components/TopBar";
 import { ThemeRestart } from "./components/ThemeRestart";
 import { UpcomingTasks } from "./components/UpcomingTasks";
@@ -23,6 +24,7 @@ import { useTasks } from "./hooks/useTasks";
 import { useTheme } from "./hooks/useTheme";
 import { useWeather } from "./hooks/useWeather";
 import { usePersonalMemory } from "./hooks/usePersonalMemory";
+import { useComputerUse } from "./hooks/useComputerUse";
 import type { NavId } from "./lib/nav";
 
 export function App() {
@@ -39,6 +41,10 @@ export function App() {
   const stats = useSystemStats();
   const animate = useAnimationEnabled();
   const session = useSession();
+  const computerUse = useComputerUse({
+    subscribeEvents: session.subscribeEvents,
+    connection: session.orbState === "offline" ? "disconnected" : session.orbState === "connecting" ? "connecting" : session.connection,
+  });
 
   const tasks = useTasks({
     subscribeEvents: session.subscribeEvents,
@@ -78,6 +84,7 @@ export function App() {
                   animate={animate}
                   getLevel={session.getLevel}
                   activities={session.activities}
+                  computerUse={computerUse}
                   now={now.getTime()}
                   onClearExecution={session.clearExecutionHistory}
                 />
@@ -127,8 +134,11 @@ export function App() {
                 activeTheme={theme.activeTheme}
                 onSelect={theme.selectTheme}
                 error={theme.error}
-                personalMemory={personalMemory}
               />
+            </main>
+          ) : page === "system" ? (
+            <main className="flex min-h-0 min-w-0 flex-1">
+              <SystemControls personalMemory={personalMemory} />
             </main>
           ) : (
             <main className="flex min-h-0 flex-1">

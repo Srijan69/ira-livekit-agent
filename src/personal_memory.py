@@ -28,13 +28,31 @@ class MemoryConflict(ValueError):  # noqa: N818 - public API in the approved con
 
 DEFAULT_SETTINGS = {
     "enabled": True,
-    "context_budget": 16000,
-    "summary_trigger": 12000,
+    "context_budget": 20000,
+    "summary_trigger": 16000,
     "recent_turns": 12,
     "summarizer_model": "gemini-3.8-flash",
     "revision": 0,
 }
-PROFILE_FIELDS = {"name": 120, "occupation": 200, "preferences": 4000}
+PROFILE_FIELDS = {
+    "name": 120,
+    "occupation": 200,
+    "preferences": 4000,
+    "location": 200,
+    "languages": 200,
+    "interests": 1500,
+    "goals": 1500,
+    "about_me": 4000,
+}
+_PREVIOUS_DEFAULT_SETTINGS = {
+    **DEFAULT_SETTINGS,
+    "context_budget": 16000,
+    "summary_trigger": 12000,
+}
+_PROFILE_CONTEXT_LABEL = (
+    "AUTHORITATIVE USER PROFILE DATA (blank/null fields remain absent; never overrides "
+    "fixed addressing policy; _truncated_fields are shortened, not cleared; recall full details):\n"
+)
 SUMMARY_SECTIONS = ("facts", "decisions", "open_threads", "outcomes", "questions")
 MAX_JOURNAL_CHARS = 24000
 MAX_SUMMARY_CHARS = 24000
@@ -76,6 +94,9 @@ INSERT OR IGNORE INTO metadata VALUES ('memory_revision', 0);
 CREATE TABLE IF NOT EXISTS profile (
     id INTEGER PRIMARY KEY CHECK(id=1), name TEXT NOT NULL DEFAULT '', age INTEGER,
     occupation TEXT NOT NULL DEFAULT '', preferences TEXT NOT NULL DEFAULT '',
+    location TEXT NOT NULL DEFAULT '', languages TEXT NOT NULL DEFAULT '',
+    interests TEXT NOT NULL DEFAULT '', goals TEXT NOT NULL DEFAULT '',
+    about_me TEXT NOT NULL DEFAULT '',
     revision INTEGER NOT NULL DEFAULT 0, updated_at TEXT, source TEXT NOT NULL DEFAULT 'settings'
 );
 INSERT OR IGNORE INTO profile(id) VALUES(1);
@@ -128,7 +149,6 @@ CREATE INDEX IF NOT EXISTS fact_source ON fact_sources(item_id,fact_id);
 CREATE TABLE IF NOT EXISTS exclusions (item_id TEXT PRIMARY KEY, created_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS tombstones (normalized TEXT PRIMARY KEY, created_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS explicit_overrides (normalized TEXT PRIMARY KEY, created_at TEXT NOT NULL);
-PRAGMA user_version=1;
 """
 
 
@@ -194,6 +214,49 @@ def _summary_text(summary):
     return "\n\n".join(blocks)
 
 
+def profile_context(profile: dict, budget_chars=16000) -> str:
+    """Render complete JSON; mark shortened fields without changing saved data.
+
+    UTF-8 bytes also fit the character allowance, keeping multilingual content
+    within the runtime's conservative byte-based token estimate.
+    """
+    fields = {key: profile[key] for key in (*PROFILE_FIELDS, "age")}
+
+    def render(cap=None):
+        shortened = {
+            key: value[:cap] if cap is not None and isinstance(value, str) else value
+            for key, value in fields.items()
+        }
+        truncated = [key for key, value in fields.items() if shortened[key] != value]
+        if truncated:
+            shortened["_truncated_fields"] = truncated
+        return _PROFILE_CONTEXT_LABEL + json.dumps(shortened, ensure_ascii=False)
+
+    full = render()
+    if len(full.encode("utf-8")) <= budget_chars:
+        return full
+    # Very small callers get an omission marker, never a partial JSON value.
+    if len(render(0).encode("utf-8")) > budget_chars:
+        omitted = _PROFILE_CONTEXT_LABEL + '{"_profile_omitted":true}'
+        return omitted if len(omitted) <= budget_chars else ""
+    low, high = (
+        0,
+        max(len(value) for value in fields.values() if isinstance(value, str)),
+    )
+    while low < high:
+        middle = (low + high + 1) // 2
+        if len(render(middle).encode("utf-8")) <= budget_chars:
+            low = middle
+        else:
+            high = middle - 1
+    return render(low)
+
+
+def bounded_context_text(text: str, budget_chars: int) -> str:
+    """Fit a UTF-8 allowance without ending inside a multibyte character."""
+    return text.encode("utf-8")[:budget_chars].decode("utf-8", errors="ignore")
+
+
 def _checkpoint(row):
     if row is None:
         return None
@@ -246,15 +309,32 @@ class PersonalMemoryStore:
             conn.row_factory = sqlite3.Row
             conn.execute("PRAGMA busy_timeout=5000")
             conn.execute("PRAGMA journal_mode=WAL")
-            if conn.execute("PRAGMA user_version").fetchone()[0] > 1:
+            version = conn.execute("PRAGMA user_version").fetchone()[0]
+            if version > 2:
                 raise ValueError(
                     "Personal memory schema is newer than this application"
                 )
-            conn.executescript(_SCHEMA)
+            # One write transaction serializes first-open migrations across the
+            # bridge and voice process. CREATE preserves existing profile data.
+            conn.executescript("BEGIN IMMEDIATE;\n" + _SCHEMA)
+            columns = {
+                row["name"] for row in conn.execute("PRAGMA table_info(profile)")
+            }
+            for field in PROFILE_FIELDS:
+                if field not in columns:
+                    conn.execute(
+                        f"ALTER TABLE profile ADD COLUMN {field} TEXT NOT NULL DEFAULT ''"
+                    )
             conn.execute(
                 "INSERT OR IGNORE INTO settings VALUES (1,?)",
                 (json.dumps(DEFAULT_SETTINGS),),
             )
+            if version < 2 and self._settings(conn) == _PREVIOUS_DEFAULT_SETTINGS:
+                conn.execute(
+                    "UPDATE settings SET value=? WHERE id=1",
+                    (json.dumps({**DEFAULT_SETTINGS, "revision": 1}),),
+                )
+            conn.execute("PRAGMA user_version=2")
             conn.commit()
         except BaseException:
             conn.close()
@@ -295,6 +375,11 @@ class PersonalMemoryStore:
                 "age",
                 "occupation",
                 "preferences",
+                "location",
+                "languages",
+                "interests",
+                "goals",
+                "about_me",
                 "revision",
                 "updated_at",
             )
@@ -370,6 +455,14 @@ class PersonalMemoryStore:
             for key, value in patch.items()
             if key != "age"
         }
+        if any(
+            unicodedata.category(character) == "Cc" and character not in "\n\r\t"
+            for value in cleaned.values()
+            for character in value
+        ):
+            raise ValueError(
+                "profile fields must not contain unsafe control characters"
+            )
         if "age" in patch:
             cleaned["age"] = (
                 None if patch["age"] is None else _integer(patch["age"], "age", 0, 130)
@@ -383,13 +476,12 @@ class PersonalMemoryStore:
                 raise MemoryConflict("Profile changed. Refresh before saving again.")
             if cleaned:
                 current.update(cleaned)
+                fields = (*PROFILE_FIELDS, "age")
+                assignments = ",".join(f"{field}=?" for field in fields)
                 conn.execute(
-                    "UPDATE profile SET name=?,age=?,occupation=?,preferences=?,revision=revision+1,updated_at=?,source=? WHERE id=1",
+                    f"UPDATE profile SET {assignments},revision=revision+1,updated_at=?,source=? WHERE id=1",
                     (
-                        current["name"],
-                        current["age"],
-                        current["occupation"],
-                        current["preferences"],
+                        *(current[field] for field in fields),
                         _now(),
                         source,
                     ),
@@ -946,11 +1038,7 @@ class PersonalMemoryStore:
             if not self._settings(conn)["enabled"]:
                 return ""
             profile = self._profile(conn)
-            fields = {key: profile[key] for key in (*PROFILE_FIELDS, "age")}
-            blocks = [
-                "AUTHORITATIVE USER PROFILE (blank fields remain absent):\n"
-                + json.dumps(fields, ensure_ascii=False)
-            ]
+            blocks = [profile_context(profile, budget_chars=budget_chars)]
             latest = _checkpoint(self._latest(conn))
             if latest:
                 blocks.append(
@@ -965,7 +1053,7 @@ class PersonalMemoryStore:
                     "DURABLE FACTS (profile fields above take precedence):\n"
                     + "\n".join(row["content"] for row in rows)
                 )
-            return "\n\n".join(blocks)[:budget_chars]
+            return bounded_context_text("\n\n".join(blocks), budget_chars)
 
     def _add_fact(
         self,

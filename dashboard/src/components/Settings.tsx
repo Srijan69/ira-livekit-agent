@@ -1,14 +1,12 @@
 import {
   ArrowUpRight,
   Check,
-  Database,
   KeyRound,
   LoaderCircle,
   LockKeyhole,
   Palette,
   Radio,
   RotateCw,
-  UserRound,
 } from "lucide-react";
 import {
   useCallback,
@@ -23,22 +21,14 @@ import type {
   ConnectionApi,
   ConnectionInput,
   ConnectionSettings,
-  PersonalMemoryApi,
 } from "@shared/types";
 
 import { THEME_ASSETS } from "@/lib/themeAssets";
 import { getTheme, THEMES, type ThemeId } from "@/lib/themes";
-import {
-  usePersonalMemory,
-  type PersonalMemoryState,
-} from "@/hooks/usePersonalMemory";
-import { MemorySettingsPanel, ProfileSettings } from "./PersonalMemorySettings";
 
 const settingsSections = [
   { id: "personalization", label: "Personalization", icon: Palette },
   { id: "connection", label: "Connection and Keys", icon: KeyRound },
-  { id: "profile", label: "Your Profile", icon: UserRound },
-  { id: "memory", label: "Memory and Context", icon: Database },
 ] as const;
 type SettingsTab = (typeof settingsSections)[number]["id"];
 type FieldErrors = Partial<Record<keyof ConnectionInput, string>>;
@@ -410,23 +400,15 @@ export function Settings({
   onSelect,
   error,
   connectionApi = window.ira?.connection,
-  personalMemoryApi = window.ira?.personalMemory,
-  personalMemory,
 }: {
   activeTheme: ThemeId;
   onSelect: (id: ThemeId) => void;
   error: string | null;
   connectionApi?: ConnectionApi;
-  personalMemoryApi?: PersonalMemoryApi;
-  personalMemory?: PersonalMemoryState;
 }) {
   const current = getTheme(activeTheme);
   const [tab, setTab] = useState<SettingsTab>("personalization");
   const tabs = useRef<(HTMLButtonElement | null)[]>([]);
-  const ownMemory = usePersonalMemory(
-    personalMemory ? null : personalMemoryApi,
-  );
-  const memory = personalMemory ?? ownMemory;
   const section = settingsSections.find((section) => section.id === tab)!;
 
   function navigateTabs(
@@ -598,22 +580,6 @@ export function Settings({
             </footer>
           </div>
         ) : null}
-        <div
-          id="settings-panel-profile"
-          role="tabpanel"
-          aria-labelledby="settings-tab-profile"
-          hidden={tab !== "profile"}
-        >
-          <ProfileSettings memory={memory} />
-        </div>
-        <div
-          id="settings-panel-memory"
-          role="tabpanel"
-          aria-labelledby="settings-tab-memory"
-          hidden={tab !== "memory"}
-        >
-          <MemorySettingsPanel memory={memory} />
-        </div>
       </div>
     </section>
   );

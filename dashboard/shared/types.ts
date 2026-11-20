@@ -94,10 +94,16 @@ export type UserProfile = {
   age: number | null;
   occupation: string;
   preferences: string;
+  /** Optional for compatibility with profiles returned before the expanded schema. */
+  location?: string;
+  languages?: string;
+  interests?: string;
+  goals?: string;
+  about_me?: string;
   revision: number;
   updated_at: string | null;
 };
-export type UserProfileInput = Pick<UserProfile, "name" | "age" | "occupation" | "preferences">;
+export type UserProfileInput = Pick<UserProfile, "name" | "age" | "occupation" | "preferences" | "location" | "languages" | "interests" | "goals" | "about_me">;
 export type MemorySettings = {
   enabled: boolean;
   context_budget: number;
@@ -183,13 +189,15 @@ export type TasksApi = {
 };
 
 /** Notifications carry no records; consumers refetch from the bridge. */
-export type IraEvent = { type: "tasks.changed" | "skills.changed" };
+export type IraEvent = { type: "tasks.changed" | "skills.changed" } | import("./computerUse").ComputerObservationEvent;
 
 export type SkillSummary = {
   slug: string;
   name: string;
   description: string;
-  version: number;
+  version: number | string;
+  mode?: "procedure" | "compiled";
+  procedure_name?: string;
   source: string;
   state: string;
   pinned: boolean;

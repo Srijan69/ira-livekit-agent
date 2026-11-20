@@ -6,6 +6,7 @@ from aiohttp.test_utils import TestClient, TestServer
 from bridge import SHARED_SECRET_HEADER, BridgeConfig, create_app
 from skill_format import Action, Skill, Step
 from skill_store import SkillStore
+from skills import SkillCatalog
 from tasks import TaskStore
 
 AUTH = {SHARED_SECRET_HEADER: "skills-secret"}
@@ -35,6 +36,7 @@ async def skills_client(tmp_path):
         config,
         tasks=TaskStore(tmp_path / "tasks.db"),
         skills=store,
+        skills_catalog=SkillCatalog(tmp_path / "procedures"),
         run_path=tmp_path / "runs.db",
     )
     async with TestClient(TestServer(app)) as client:

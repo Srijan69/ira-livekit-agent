@@ -282,6 +282,7 @@ def create_app(
     *,
     tasks: TaskStore | None = None,
     skills: SkillStore | None = None,
+    skills_catalog=None,
     run_path: str | Path | None = None,
     personal_memory: PersonalMemoryStore | None = None,
 ) -> web.Application:
@@ -290,7 +291,13 @@ def create_app(
     app[CONFIG] = config
     app[TASKS] = tasks if tasks is not None else TaskStore()
     app.on_cleanup.append(_close_tasks)
-    register_skill_routes(app, _require_secret, skills=skills, run_path=run_path)
+    register_skill_routes(
+        app,
+        _require_secret,
+        skills=skills,
+        skills_catalog=skills_catalog,
+        run_path=run_path,
+    )
     register_personal_memory_routes(app, _require_secret, store=personal_memory)
     app.add_routes(
         [

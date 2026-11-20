@@ -51,7 +51,7 @@ export const NAV_ITEMS: readonly NavItem[] = [
   { id: "voice", label: "Voice", icon: Mic, ready: false },
   { id: "tasks", label: "Tasks", icon: ClipboardCheck, ready: false },
   { id: "automation", label: "Automation", icon: Activity, ready: true },
-  { id: "system", label: "System Control", icon: SlidersHorizontal, ready: false },
+  { id: "system", label: "System Controls", icon: SlidersHorizontal, ready: true },
   { id: "apps", label: "Apps", icon: LayoutGrid, ready: false },
   { id: "research", label: "Research", icon: Telescope, ready: false },
   { id: "settings", label: "Settings", icon: Settings, ready: true },
