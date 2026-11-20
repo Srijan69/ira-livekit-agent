@@ -17,18 +17,18 @@ import skill_store
 from skill_format import Action, Skill, Step, parse_skill, render_skill
 from skill_store import SkillStore
 
-LEGACY_PLAYLIST = """\
+LEGACY_WEB_PAGE = """\
 ---
-name: Play Favorite Playlist
-goal: Play the boss's favorite funk songs playlist in Brave browser.
+name: Open Reference Pages
+goal: Open the requested reference pages in Brave browser.
 version: 1
-allowed_tools: open_app, browse_to, spotify_play_playlist
+allowed_tools: open_app, browse_to
 ---
 
 ## Steps
 
 1. open_app: app_name="Brave"
-2. browse_to: url="https://open.spotify.com"
+2. browse_to: url="https://example.test"
 """
 
 
@@ -171,27 +171,27 @@ class TestLegacyAndHandEdits:
     def test_reads_an_old_workflow_file_without_touching_it(
         self, store: SkillStore, tmp_path: Path
     ) -> None:
-        path = tmp_path / "play-favorite-playlist.md"
-        path.write_text(LEGACY_PLAYLIST, encoding="utf-8")
+        path = tmp_path / "open-reference-pages.md"
+        path.write_text(LEGACY_WEB_PAGE, encoding="utf-8")
 
-        skill = store.get("Play Favorite Playlist")
+        skill = store.get("Open Reference Pages")
 
         assert skill.steps[0].action.args == (("app_name", "Brave"),)
-        assert path.read_text(encoding="utf-8") == LEGACY_PLAYLIST
+        assert path.read_text(encoding="utf-8") == LEGACY_WEB_PAGE
 
     def test_migration_rewrites_old_files_and_keeps_the_original(
         self, store: SkillStore, tmp_path: Path
     ) -> None:
-        (tmp_path / "play-favorite-playlist.md").write_text(
-            LEGACY_PLAYLIST, encoding="utf-8"
+        (tmp_path / "open-reference-pages.md").write_text(
+            LEGACY_WEB_PAGE, encoding="utf-8"
         )
 
         migrated = store.migrate_legacy()
 
-        assert migrated == ["Play Favorite Playlist"]
-        skill = store.get("Play Favorite Playlist")
+        assert migrated == ["Open Reference Pages"]
+        skill = store.get("Open Reference Pages")
         assert (skill.version, skill.source) == (2, "compiled")
-        assert store.version_text("Play Favorite Playlist", 1) == LEGACY_PLAYLIST
+        assert store.version_text("Open Reference Pages", 1) == LEGACY_WEB_PAGE
         assert store.migrate_legacy() == []
 
     def test_notices_a_hand_edit_and_records_it_as_a_version(

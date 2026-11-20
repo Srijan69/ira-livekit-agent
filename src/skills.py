@@ -13,11 +13,11 @@ Port of the Hermes Agent skill system (progressive disclosure):
 
 from __future__ import annotations
 
-import contextlib
+import hashlib
+import json
 import logging
 import os
 import re
-import shutil
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -28,18 +28,50 @@ logger = logging.getLogger("agent.skills")
 # Supporting subfolder names
 SUPPORT_DIRS = ("references", "templates", "assets", "scripts")
 
+
+def package_snapshot(skill_md: Path, *, content: str | None = None):
+    """Freeze the document and every contained supporting file's identity."""
+    skill_md = Path(skill_md)
+    root = skill_md.parent.resolve()
+    markdown = (
+        (content if content is not None else skill_md.read_text(encoding="utf-8"))
+        .strip()
+        .replace("\r\n", "\n")
+    )
+    hashes = [("SKILL.md", hashlib.sha256(markdown.encode()).hexdigest())]
+    for folder in SUPPORT_DIRS:
+        for path in sorted((root / folder).rglob("*")):
+            if not path.is_file():
+                continue
+            if not path.resolve().is_relative_to(root):
+                raise ValueError("Supporting file is outside its procedure package.")
+            hashes.append(
+                (
+                    path.relative_to(root).as_posix(),
+                    hashlib.sha256(path.read_bytes()).hexdigest(),
+                )
+            )
+    hashes = tuple(sorted(hashes))
+    digest = hashlib.sha256(
+        json.dumps(hashes, separators=(",", ":"), ensure_ascii=True).encode()
+    ).hexdigest()
+    return digest, markdown, hashes
+
+
+def package_digest(skill_md: Path) -> str:
+    """The digest used by decisions, lifecycle records, and reviewed.json."""
+    return package_snapshot(skill_md)[0]
+
+
 DETERMINISTIC_TOOLS = {
     "open_app",
     "browse_to",
-    "open_spotify",
     "read_page",
     "list_page_elements",
     "click_element",
     "type_into_element",
     "go_back",
     "close_browser",
-    "spotify_control",
-    "spotify_play_playlist",
     "new_tab",
     "switch_tab",
     "list_tabs",
@@ -108,6 +140,10 @@ class SkillInfo:
     path: Path | None = None
     body: str = ""
     linked_files: dict[str, list[str]] = field(default_factory=dict)
+    canonical_id: str = ""
+    digest: str = ""
+    supporting_digests: tuple[tuple[str, str], ...] = ()
+    routing: dict[str, Any] = field(default_factory=dict)
 
 
 class SkillCatalog:
@@ -122,6 +158,38 @@ class SkillCatalog:
         self.root = Path(root).resolve() if root is not None else default_skills_dir()
         self.platform_override = platform_override
         self.root.mkdir(parents=True, exist_ok=True)
+        self._state_store = None
+
+    @property
+    def state_store(self):
+        if self._state_store is None:
+            from procedure_state import ProcedureStateStore
+
+            self._state_store = ProcedureStateStore(
+                self.root / ".procedures.sqlite3",
+                reviewed_manifest=self.root / "reviewed.json",
+            )
+        return self._state_store
+
+    def enable_skill(self, name, *, available_tools=()):
+        info = self.get_skill(name)
+        if info is None:
+            raise ValueError("Procedure not found or name is ambiguous.")
+        return self.state_store.enable(info, available_tools=available_tools)
+
+    def validate_skill(self, name, *, available_tools=()):
+        info = self.get_skill(name)
+        if info is None:
+            raise ValueError("Procedure not found or name is ambiguous.")
+        return self.state_store.validate(info, available_tools=available_tools)
+
+    def archive_skill(self, name):
+        info = self.get_skill(name, include_archived=True)
+        return bool(info and self.state_store.archive(info))
+
+    def restore_skill(self, name):
+        info = self.get_skill(name, include_archived=True)
+        return self.state_store.restore(info) if info else None
 
     def _discover_linked_files(self, skill_dir: Path) -> dict[str, list[str]]:
         """Collect relative paths to files in references/, templates/, assets/, scripts/."""
@@ -181,11 +249,19 @@ class SkillCatalog:
         if isinstance(platforms, str):
             platforms = [platforms]
 
-        tags = frontmatter.get("tags", [])
+        nested = hermes_meta.get("hermes", {}) if isinstance(hermes_meta, dict) else {}
+        tags = frontmatter.get(
+            "tags", nested.get("tags", []) if isinstance(nested, dict) else []
+        )
         if isinstance(tags, str):
             tags = [t.strip() for t in tags.split(",") if t.strip()]
 
         linked_files = self._discover_linked_files(skill_dir)
+        try:
+            digest, _, files = package_snapshot(skill_md, content=content)
+        except (OSError, ValueError):
+            logger.warning("Could not establish a contained procedure package identity")
+            return None
 
         return SkillInfo(
             name=name,
@@ -198,9 +274,18 @@ class SkillCatalog:
             path=skill_md,
             body=body,
             linked_files=linked_files,
+            canonical_id="procedure:" + skill_dir.relative_to(self.root).as_posix(),
+            digest=digest,
+            supporting_digests=tuple(item for item in files if item[0] != "SKILL.md"),
+            routing=hermes_meta.get("ira", {})
+            if isinstance(hermes_meta, dict)
+            and isinstance(hermes_meta.get("ira", {}), dict)
+            else {},
         )
 
-    def list_skills(self, category: str | None = None) -> list[SkillInfo]:
+    def list_skills(
+        self, category: str | None = None, *, include_archived: bool = False
+    ) -> list[SkillInfo]:
         """Scan skills directory and return loadable skills compatible with current platform."""
         skills: list[SkillInfo] = []
         plat = self.platform_override or current_platform()
@@ -224,31 +309,45 @@ class SkillCatalog:
             # Category filter
             if category and info.category.lower() != category.lower():
                 continue
+            if not include_archived and self.state_store.state(info)["archived"]:
+                continue
             skills.append(info)
 
         skills.sort(key=lambda s: (s.category, s.name))
         return skills
 
-    def get_skill(self, name: str) -> SkillInfo | None:
+    def get_skill(
+        self, name: str, *, include_archived: bool = False
+    ) -> SkillInfo | None:
         """Find a skill by name or slug."""
         target = name.strip().lower()
         target = target.removeprefix("procedure:").replace("\\", "/")
         if not target or ".." in target.split("/") or Path(target).is_absolute():
             return None
-        available = self.list_skills()
+        if name.strip().lower().startswith("procedure:"):
+            path = (self.root / target / "SKILL.md").resolve()
+            if not path.is_relative_to(self.root) or not path.is_file():
+                return None
+            info = self._parse_skill_file(path)
+            platform = self.platform_override or current_platform()
+            if info is None or (
+                platform not in info.platforms and "all" not in info.platforms
+            ):
+                return None
+            if not include_archived and self.state_store.state(info)["archived"]:
+                return None
+            return info
+        from task_routing import normalized_name
+
+        available = self.list_skills(include_archived=include_archived)
         matches = [
             s
             for s in available
-            if s.name.lower() == target
+            if normalized_name(s.name) == normalized_name(target)
             or s.path.parent.relative_to(self.root).as_posix().lower() == target
         ]
         if matches:
             return matches[0] if len(matches) == 1 else None
-        # Tolerant search only through already-filtered, contained packages.
-        matches = [s for s in available if target in s.name.lower()]
-        if len(matches) == 1:
-            return matches[0]
-
         return None
 
     def view_skill(self, name: str, file_path: str | None = None) -> dict[str, Any]:
@@ -302,6 +401,10 @@ class SkillCatalog:
             "tags": list(skill.tags),
             "linked_files": skill.linked_files,
             "instructions": skill.body,
+            "canonical_id": skill.canonical_id,
+            "document_digest": skill.digest,
+            "state": self.state_store.state(skill)["state"],
+            "routing": skill.routing,
         }
 
     def catalog(self, include_archived: bool = False) -> list[dict[str, Any]]:
@@ -354,8 +457,13 @@ class SkillCatalog:
             return {"success": False, "error": "Invalid skill name."}
 
         target_dir = self.root / clean_cat / clean_name
-        target_dir.mkdir(parents=True, exist_ok=True)
         skill_md = target_dir / "SKILL.md"
+        if skill_md.exists():
+            return {
+                "success": False,
+                "error": "That procedure already exists; explicitly edit it instead.",
+            }
+        target_dir.mkdir(parents=True, exist_ok=True)
 
         # If content doesn't have frontmatter, add default header
         text = content.strip()
@@ -369,6 +477,9 @@ class SkillCatalog:
             text = header + text
 
         skill_md.write_text(text, encoding="utf-8")
+        info = self._parse_skill_file(skill_md)
+        if info is not None:
+            self.state_store.observe(info)
         return {
             "success": True,
             "message": f"Created skill '{clean_name}' in category '{clean_cat}'.",
@@ -377,11 +488,15 @@ class SkillCatalog:
 
     def edit_skill(self, name: str, content: str) -> dict[str, Any]:
         """Overwrite SKILL.md of an existing skill."""
-        skill = self.get_skill(name)
+        skill = self.get_skill(name, include_archived=True)
         if skill is None or skill.path is None:
             return {"success": False, "error": f"Skill '{name}' not found."}
 
+        self.state_store.observe(skill)
         skill.path.write_text(content.strip(), encoding="utf-8")
+        edited = self._parse_skill_file(skill.path)
+        if edited is not None:
+            self.state_store.invalidate(edited)
         return {"success": True, "message": f"Updated skill '{skill.name}'."}
 
     def patch_skill(
@@ -417,28 +532,29 @@ class SkillCatalog:
                 "error": f"old_string '{old_string}' appears multiple times. Include more context.",
             }
 
+        self.state_store.observe(skill)
         patched = content.replace(old_string, new_string, 1)
         target.write_text(patched, encoding="utf-8")
+        edited = self._parse_skill_file(skill.path)
+        if edited is not None:
+            self.state_store.invalidate(edited)
         return {
             "success": True,
             "message": f"Patched {target.name} in skill '{skill.name}'.",
         }
 
     def delete_skill(self, name: str) -> dict[str, Any]:
-        """Delete a skill package directory."""
+        """Archive a skill package, retaining revisions and supporting files."""
         skill = self.get_skill(name)
         if skill is None or skill.path is None:
             return {"success": False, "error": f"Skill '{name}' not found."}
 
-        skill_dir = skill.path.parent
         try:
-            shutil.rmtree(skill_dir)
-            # Remove empty parent category directory if applicable
-            parent = skill_dir.parent
-            if parent != self.root and parent.is_dir() and not any(parent.iterdir()):
-                with contextlib.suppress(OSError):
-                    parent.rmdir()
-            return {"success": True, "message": f"Deleted skill '{skill.name}'."}
+            self.state_store.archive(skill)
+            return {
+                "success": True,
+                "message": f"Deleted skill '{skill.name}' from the active catalog; archived files are recoverable.",
+            }
         except Exception as exc:
             return {"success": False, "error": f"Failed to delete skill: {exc}"}
 
@@ -473,6 +589,9 @@ class SkillCatalog:
 
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(text, encoding="utf-8")
+        edited = self._parse_skill_file(skill.path)
+        if edited is not None:
+            self.state_store.invalidate(edited)
         return {
             "success": True,
             "message": f"Saved {file_path} in skill '{skill.name}'.",
@@ -490,6 +609,9 @@ class SkillCatalog:
             return {"success": False, "error": f"File '{file_path}' not found."}
 
         target.unlink()
+        edited = self._parse_skill_file(skill.path)
+        if edited is not None:
+            self.state_store.invalidate(edited)
         return {
             "success": True,
             "message": f"Removed {file_path} from skill '{skill.name}'.",

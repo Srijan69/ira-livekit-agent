@@ -118,13 +118,13 @@ async def test_verified_run_keeps_pinned_version_and_observation_history(tmp_pat
     store = SkillRunStore(tmp_path / "runs.db")
 
     def open_app(app_name: str):
-        assert app_name == "Spotify"
+        assert app_name == "Calculator"
         return ToolOutcome(True, "opened", "window id 42")
 
     original = skill(
         step(args=(("app_name", "{app}"),)),
         version=7,
-        inputs=(SkillInput("app", "Application", "Spotify"),),
+        inputs=(SkillInput("app", "Application", "Calculator"),),
         done_check=Check("page_contains", "Playing"),
     )
     service = SkillExecutionService(verifier=observed, run_store=store)

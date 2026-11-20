@@ -4,9 +4,9 @@ from tool_dispatch import format_tool_error, repair_json_string, repair_tool_arg
 
 
 def test_repair_json_string_strips_code_fences():
-    text = '```json\n{"playlist_name": "My Phonk Songs"}\n```'
+    text = '```json\n{"skill_name": "Open Web Page"}\n```'
     cleaned = repair_json_string(text)
-    assert cleaned == '{"playlist_name": "My Phonk Songs"}'
+    assert cleaned == '{"skill_name": "Open Web Page"}'
 
 
 def test_repair_json_string_strips_trailing_commas():
@@ -19,29 +19,22 @@ def test_repair_json_string_strips_trailing_commas():
     assert cleaned_nested == '{"items": [1, 2, 3], "val": true}'
 
 
-def test_repair_tool_arguments_coerces_spotify_aliases():
-    # Coerce playlist_name -> name
+def test_repair_tool_arguments_coerces_skill_aliases():
+    # Coerce skill_name -> name
     repaired = repair_tool_arguments(
-        '{"playlist_name": "My Phonk Songs"}',
+        '{"skill_name": "Open Web Page"}',
         expected_params={"name"},
     )
-    assert repaired == {"name": "My Phonk Songs"}
-
-    # Coerce song_name -> name, artist_name -> artist
-    repaired_track = repair_tool_arguments(
-        {"song_name": "Metamorphosis", "singer": "Interworld"},
-        expected_params={"name", "artist"},
-    )
-    assert repaired_track == {"name": "Metamorphosis", "artist": "Interworld"}
+    assert repaired == {"name": "Open Web Page"}
 
 
 def test_repair_tool_arguments_coerces_app_and_task_aliases():
     # Coerce name -> app_name when app_name is expected
     repaired_app = repair_tool_arguments(
-        {"name": "Spotify"},
+        {"name": "Calculator"},
         expected_params={"app_name", "context"},
     )
-    assert repaired_app == {"app_name": "Spotify"}
+    assert repaired_app == {"app_name": "Calculator"}
 
     # Coerce task -> title when title is expected
     repaired_task = repair_tool_arguments(
@@ -59,8 +52,8 @@ def test_repair_tool_arguments_coerces_app_and_task_aliases():
 
 
 def test_repair_tool_arguments_handles_single_quotes():
-    repaired = repair_tool_arguments("{'name': 'My Phonk Songs'}")
-    assert repaired == {"name": "My Phonk Songs"}
+    repaired = repair_tool_arguments("{'name': 'Open Web Page'}")
+    assert repaired == {"name": "Open Web Page"}
 
 
 def test_repair_tool_arguments_serializes_dict_inputs_json():
@@ -72,10 +65,10 @@ def test_repair_tool_arguments_serializes_dict_inputs_json():
 
 def test_format_tool_error_provides_diagnostic_advice():
     # LookupError
-    err = LookupError("playlist not found")
-    msg = format_tool_error(err, "spotify_play_playlist")
-    assert "spotify_play_playlist" in msg
-    assert "playlist not found" in msg
+    err = LookupError("skill not found")
+    msg = format_tool_error(err, "view_skill")
+    assert "view_skill" in msg
+    assert "skill not found" in msg
     assert "try searching with alternative wording" in msg
 
     # TimeoutError
@@ -85,6 +78,6 @@ def test_format_tool_error_provides_diagnostic_advice():
     assert "inspect the screen or retry" in time_msg
 
     # ValueError
-    val_err = ValueError("empty track name")
-    val_msg = format_tool_error(val_err, "spotify_play_track")
+    val_err = ValueError("empty app name")
+    val_msg = format_tool_error(val_err, "open_app")
     assert "invalid parameters" in val_msg

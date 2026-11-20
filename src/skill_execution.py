@@ -331,11 +331,6 @@ class SkillExecutionService:
         if len(declared) != len(skill.inputs):
             raise ValueError("duplicate declared inputs")
         provided = dict(inputs or {})
-        if "playlist" in declared and "playlist" not in provided:
-            for alt in ("name", "playlist_name", "title"):
-                if alt in provided:
-                    provided["playlist"] = provided.pop(alt)
-                    break
         if "app" in declared and "app" not in provided:
             for alt in ("name", "app_name", "application"):
                 if alt in provided:

@@ -28,28 +28,37 @@ def _procedures(app):
 
 def _procedure_summary(catalog, info):
     relative = info.path.parent.relative_to(catalog.root).as_posix()
+    lifecycle = catalog.state_store.state(info)
     return {
         "slug": "procedure-" + hashlib.sha256(relative.encode()).hexdigest()[:20],
         "name": info.name,
         "description": info.description,
         "version": info.version,
         "source": "package",
-        "state": "ready",
+        "state": lifecycle["state"],
         "mode": "procedure",
         "procedure_name": "procedure:" + relative,
         "category": info.category,
         "pinned": False,
-        "archived": False,
-        "use_count": 0,
-        "failure_count": 0,
+        "archived": lifecycle["archived"],
+        "use_count": lifecycle["use_count"],
+        "failure_count": lifecycle["failure_count"],
+        "success_count": lifecycle["success_count"],
+        "canonical_id": info.canonical_id,
+        "document_digest": info.digest,
+        "task_kinds": info.routing.get("task_kinds", []),
         "issues": [],
-        "executable": True,
+        "executable": lifecycle["state"] == "enabled" and not lifecycle["archived"],
+        "run_once_available": lifecycle["state"] in {"draft", "validated", "enabled"}
+        and not lifecycle["archived"]
+        and bool(info.routing),
+        "can_run_once": catalog.state_store.can_run_once(info),
     }
 
 
 def _procedure_entry(app, slug):
     catalog = _procedures(app)
-    for info in catalog.list_skills():
+    for info in catalog.list_skills(include_archived=True):
         result = _procedure_summary(catalog, info)
         if result["slug"] == slug:
             return info, result
@@ -74,6 +83,13 @@ def _summary(entry: StoredSkill) -> dict:
         "executable": bool(
             skill
             and skill.state == "enabled"
+            and not entry.archived
+            and not entry.issues
+        ),
+        "can_run_once": bool(
+            skill
+            and skill.compiled
+            and skill.steps
             and not entry.archived
             and not entry.issues
         ),
@@ -141,7 +157,11 @@ def register_skill_routes(
                 ]
                 + [
                     _procedure_summary(procedures, info)
-                    for info in procedures.list_skills()
+                    for info in procedures.list_skills(
+                        include_archived=include == "true"
+                    )
+                    if include == "true"
+                    or not procedures.state_store.state(info)["archived"]
                 ]
             }
 
@@ -151,14 +171,17 @@ def register_skill_routes(
         def read():
             procedure = _procedure_entry(app, _slug(request))
             if procedure:
-                if "version" in request.query:
-                    raise ValueError(
-                        "Procedural packages expose their current document; version history applies to compiled workflows."
-                    )
                 info, result = procedure
+                state = _procedures(app).state_store
+                versions = state.versions(info.canonical_id)
+                selected = int(request.query.get("version", str(versions[-1])))
+                markdown = state.version_text(info.canonical_id, selected)
+                if markdown is None:
+                    raise KeyError("Version not found")
                 result.update(
-                    markdown=info.path.read_text(encoding="utf-8"),
-                    versions=[],
+                    markdown=markdown,
+                    selected_version=selected,
+                    versions=versions,
                     linked_files=info.linked_files,
                 )
                 return {"skill": result}
@@ -202,7 +225,13 @@ def register_skill_routes(
                 raise ValueError("limit must be between 1 and 100")
             store = _store(app)
             runs = SkillRunStore(app[RUN_PATH] or store.root / ".runs.sqlite3")
-            return {"runs": runs.list(limit=limit)}
+            adaptive = _procedures(app).state_store.run_store.list(limit=limit)
+            combined = sorted(
+                runs.list(limit=limit) + adaptive,
+                key=lambda row: row["started_at"],
+                reverse=True,
+            )
+            return {"runs": combined[:limit]}
 
         return await response(request, read)
 
@@ -242,10 +271,10 @@ def register_skill_routes(
 
     async def archive(request):
         def update():
-            if _procedure_entry(app, _slug(request)):
-                raise ValueError(
-                    "Use IRA's skill_manage to manage procedural packages. Archiving applies to compiled workflows."
-                )
+            procedure = _procedure_entry(app, _slug(request))
+            if procedure:
+                _procedures(app).state_store.archive(procedure[0])
+                return {"archived": True}
             store = _store(app)
             slug = _slug(request)
             _entry(store, slug)
@@ -256,6 +285,11 @@ def register_skill_routes(
 
     async def restore(request):
         def update():
+            procedure = _procedure_entry(app, _slug(request))
+            if procedure:
+                info, _ = procedure
+                _procedures(app).state_store.restore(info)
+                return {"skill": _procedure_summary(_procedures(app), info)}
             store = _store(app)
             slug = _slug(request)
             if store.restore(slug) is None:

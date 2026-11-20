@@ -288,7 +288,7 @@ def test_open_app_is_registered_as_a_tool() -> None:
 def test_open_app_description_mentions_opening_an_app(
     use_parameters_json_schema: bool,
 ) -> None:
-    """The description is what the model matches "open Spotify" against."""
+    """The description is what the model matches "open Calculator" against."""
     tool = next(t for t in Assistant().tools if t.info.name == "open_app")
     schemas = ToolContext([tool]).parse_function_tools(
         "google", use_parameters_json_schema=use_parameters_json_schema
@@ -305,7 +305,7 @@ def test_open_app_description_mentions_opening_an_app(
 
 
 def test_sanitize_keeps_an_ordinary_name() -> None:
-    assert _sanitize_app_name("Spotify") == "Spotify"
+    assert _sanitize_app_name("Calculator") == "Calculator"
 
 
 def test_sanitize_trims_and_collapses_whitespace() -> None:
@@ -357,11 +357,11 @@ def fake_pyautogui():
 def test_launch_presses_win_types_the_name_then_enter(fake_pyautogui) -> None:
     """Order matters: the name must land after the Start menu has focus."""
     with patch("agent.time.sleep"):
-        _launch_via_start_menu("Spotify")
+        _launch_via_start_menu("Calculator")
 
     assert fake_pyautogui.mock_calls == [
         call.press("win"),
-        call.write("Spotify", interval=0.02),
+        call.write("Calculator", interval=0.02),
         call.press("enter"),
     ]
 
@@ -378,9 +378,9 @@ def test_launch_waits_between_keystrokes(fake_pyautogui) -> None:
 async def test_open_app_reports_what_it_did(fake_pyautogui) -> None:
     """It cannot confirm the app launched, so it must not claim that it did."""
     with patch("agent.time.sleep"):
-        result = await Assistant().open_app(None, app_name="Spotify")
+        result = await Assistant().open_app(None, app_name="Calculator")
 
-    assert "Spotify" in result
+    assert "Calculator" in result
     fake_pyautogui.press.assert_any_call("win")
 
 
@@ -404,10 +404,10 @@ async def test_open_app_surfaces_a_missing_pyautogui() -> None:
     with (
         patch.dict(sys.modules, {"pyautogui": None}),
         pytest.raises(
-            ToolError, match="Cannot open Spotify: desktop control is unavailable"
+            ToolError, match="Cannot open Calculator: desktop control is unavailable"
         ),
     ):
-        await Assistant().open_app(None, app_name="Spotify")
+        await Assistant().open_app(None, app_name="Calculator")
 
 
 async def test_open_app_survives_a_desktopless_host(fake_pyautogui) -> None:
@@ -416,9 +416,9 @@ async def test_open_app_survives_a_desktopless_host(fake_pyautogui) -> None:
 
     with (
         patch("agent.time.sleep"),
-        pytest.raises(ToolError, match="Could not open Spotify"),
+        pytest.raises(ToolError, match="Could not open Calculator"),
     ):
-        await Assistant().open_app(None, app_name="Spotify")
+        await Assistant().open_app(None, app_name="Calculator")
 
 
 # --------------------------------------------------------------------------
@@ -533,9 +533,6 @@ class FakeBrowser:
         self.visited.append(url)
         return "Example Domain. 3 things to act on."
 
-    def open_spotify(self, browser: str | None = None) -> str:
-        return f"Spotify opened in {browser or 'chrome'}."
-
     def read_page(self) -> str:
         return "Some page text."
 
@@ -554,9 +551,6 @@ class FakeBrowser:
     def close(self) -> str:
         self.closed = True
         return "Browser closed."
-
-    def spotify_control(self, action: str, seconds: int = 10) -> str:
-        return f"Spotify {action} requested ({seconds})."
 
 
 BROWSER_TOOLS = {
@@ -691,15 +685,9 @@ async def test_capture_screen_reports_actual_foreground_and_image_size(
     )
 
 
-def test_spotify_and_general_playwright_tools_are_registered() -> None:
+def test_general_playwright_tools_are_registered() -> None:
     assistant = Assistant()
     tool_names = {tool.info.name for tool in assistant.tools}
-    assert {
-        "open_spotify",
-        "spotify_control",
-        "spotify_play_playlist",
-        "spotify_play_track",
-    } <= tool_names
     # General Playwright browser tools must be registered
     assert {
         "browse_to",
@@ -715,18 +703,18 @@ def test_spotify_and_general_playwright_tools_are_registered() -> None:
 async def test_hermes_skills_progressive_disclosure(tmp_path) -> None:
     catalog = SkillCatalog(tmp_path / "skills")
     catalog.create_skill(
-        "play-focus-music",
-        content="---\nname: play-focus-music\ndescription: Play focus music on Spotify.\ncategory: media\n---\n\n# Steps\n1. Open Spotify.",
-        category="media",
+        "open-reference-page",
+        content="---\nname: open-reference-page\ndescription: Inspect a requested web page.\ncategory: web\n---\n\n# Steps\n1. Open the requested page.",
+        category="web",
     )
     agent = Assistant(skills_catalog=catalog)
     listed = await agent.skills_list(None)
-    assert "play-focus-music" in listed
-    assert "media" in listed
+    assert "open-reference-page" in listed
+    assert "web" in listed
 
-    view = await agent.skill_view(None, name="play-focus-music")
-    assert "Play focus music on Spotify" in view
-    assert "Open Spotify" in view
+    view = await agent.skill_view(None, name="open-reference-page")
+    assert "Inspect a requested web page" in view
+    assert "Open the requested page" in view
 
 
 async def test_verified_skill_resolves_phrase_and_executes_declared_actions(
@@ -736,27 +724,31 @@ async def test_verified_skill_resolves_phrase_and_executes_declared_actions(
     store = SkillStore(tmp_path)
     store.save(
         Skill(
-            name="Play focus",
-            description="Play focus music",
+            name="Open reference pages",
+            description="Open and verify requested reference pages",
             state="enabled",
-            phrases=("start my focus playlist in Spotify",),
-            allowed_tools=("open_spotify", "spotify_control"),
+            phrases=("open reference pages",),
+            allowed_tools=("browse_to",),
             steps=(
                 Step(
                     1,
-                    "Open Spotify",
+                    "Open the first page",
                     action=Action(
-                        "tool", tool="open_spotify", args=(("browser", "chrome"),)
+                        "tool",
+                        tool="browse_to",
+                        args=(("url", "https://example.test/first"),),
                     ),
-                    check=Check("page_contains", "Spotify"),
+                    check=Check("page_contains", "First reference"),
                 ),
                 Step(
                     2,
-                    "Start playback",
+                    "Open the second page",
                     action=Action(
-                        "tool", tool="spotify_control", args=(("action", "play"),)
+                        "tool",
+                        tool="browse_to",
+                        args=(("url", "https://example.test/second"),),
                     ),
-                    check=Check("page_element", '[data-testid="control-button-pause"]'),
+                    check=Check("page_contains", "Second reference"),
                 ),
             ),
         ),
@@ -765,33 +757,29 @@ async def test_verified_skill_resolves_phrase_and_executes_declared_actions(
     calls = []
 
     class ObservedBrowser(FakeBrowser):
-        def open_spotify(self, browser=None):
-            calls.append(("open", browser))
-            return "Spotify opened"
-
-        def spotify_control(self, action, seconds=10):
-            calls.append(("control", action))
-            return "Playback requested"
+        def navigate(self, url):
+            calls.append(("navigate", url))
+            return "Reference page opened"
 
         def observe(self, kind, value):
-            if (kind, value) == ("page_contains", "Spotify"):
-                return calls == [("open", "chrome")]
-            if (kind, value) == (
-                "page_element",
-                '[data-testid="control-button-pause"]',
-            ):
-                return calls[-1] == ("control", "play")
+            if (kind, value) == ("page_contains", "First reference"):
+                return calls == [("navigate", "https://example.test/first")]
+            if (kind, value) == ("page_contains", "Second reference"):
+                return calls[-1] == ("navigate", "https://example.test/second")
             return False
 
     result = await Assistant(
         browser=ObservedBrowser(),
         skills=store,
         reporter=SessionStatusReporter(sink=lines.append),
-    ).run_skill(None, "start my focus playlist in Spotify")
+    ).run_skill(None, "open reference pages")
 
     assert "completed" in result.lower()
     assert "2/2 steps verified" in result
-    assert calls == [("open", "chrome"), ("control", "play")]
+    assert calls == [
+        ("navigate", "https://example.test/first"),
+        ("navigate", "https://example.test/second"),
+    ]
     assert any("DELEGATING" in line for line in lines)
     assert len([line for line in lines if "VERIFYING" in line]) == 2
     assert any("DONE" in line for line in lines)

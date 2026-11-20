@@ -285,23 +285,28 @@ export function Skills({
           )}
           {skills.map((skill) => {
             const procedural = skill.mode === "procedure";
+            const matchesRun = (run: SkillRun) =>
+              run.skill_slug === skill.slug || (procedural && run.skill_slug === skill.procedure_name);
             const waiting = runs.some(
-              (run) => run.skill_slug === skill.slug && run.status === "waiting",
+              (run) => matchesRun(run) && run.status === "waiting",
             );
+            const activeRun = runs.find((run) => matchesRun(run) && ["loaded", "running"].includes(run.status));
             const running = activities.find(
               (item) =>
-                item.skillSlug === skill.slug &&
+                (item.skillSlug === skill.slug || (procedural && item.skillSlug === skill.procedure_name)) &&
                 active(item) &&
                 !runs.some(
                   (run) =>
                     run.run_id === item.skillRunId && run.status === "waiting",
                 ),
-            );
+            ) || (activeRun ? { skillRunId: activeRun.run_id, phase: activeRun.status,
+              progress: `${activeRun.completed_steps}/${activeRun.total_steps}` } : undefined);
             const runnable =
               connected &&
               !skill.archived &&
-              (procedural ? skill.state === "ready" : skill.state === "enabled") &&
-              skill.executable !== false &&
+              (skill.can_run_once === true ||
+                ((procedural ? ["ready", "enabled"].includes(skill.state) : skill.state === "enabled") &&
+                  skill.executable !== false)) &&
               !skill.issues?.length &&
               !waiting &&
               !running;
@@ -314,19 +319,21 @@ export function Skills({
                   <Activity size={18} />
                   <h2>{skill.name}</h2>
                   <span className="skill-state">
-                    {skill.archived ? "Archived" : procedural ? "Procedure" : titleCase(skill.state)}
+                    {skill.archived ? "Archived" : procedural && skill.state === "ready" ? "Procedure" : titleCase(skill.state)}
                   </span>
                 </div>
                 <p>{skill.description}</p>
                 <div className="skill-meta">
                   <span>Version {skill.version}</span>
-                  {!procedural && <span>{skill.use_count} runs</span>}
-                  {!procedural && <span>{skill.failure_count} failures</span>}
+                  <span>{skill.use_count} runs</span>
+                  <span>{skill.failure_count} failures</span>
                   {skill.pinned && <span>Pinned</span>}
                 </div>
                 {skill.state === "draft" && (
                   <p className="skill-hint">
-                    Draft — review and compile with IRA before running.
+                    {skill.can_run_once
+                      ? "Draft — run once after validation; enable for automatic reuse."
+                      : "Draft — review and compile with IRA before running."}
                   </p>
                 )}
                 {skill.issues?.map((issue) => (

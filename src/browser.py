@@ -11,10 +11,9 @@ import shutil
 import uuid
 from dataclasses import dataclass
 from typing import Any
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import urljoin, urlsplit, urlunsplit
 
 from browser_runtime import ACTION_TIMEOUT, BrowserWorker, browser_call
-from spotify_browser import SpotifyBrowser
 
 logger = logging.getLogger("agent.browser")
 
@@ -316,7 +315,7 @@ def _profile_lock_detected(config):
     )
 
 
-class BrowserController(SpotifyBrowser):
+class BrowserController:
     """Native Playwright pages and controls owned by one dedicated thread.
 
     Public methods remain synchronous for the existing host-action boundary.
@@ -479,18 +478,6 @@ class BrowserController(SpotifyBrowser):
         finally:
             self._clear_elements()
         return self.describe_page()
-
-    @browser_call
-    def open_spotify(self, browser=None):
-        selected = (browser or self._browser).strip().lower()
-        if selected not in {"chrome", "brave"}:
-            raise ValueError("Browser must be chrome or brave")
-        self._check_action()
-        if selected != self._browser:
-            self._close_context()
-        self._check_action()
-        self._browser = selected
-        return self.navigate("https://open.spotify.com")
 
     @browser_call
     def back(self):
@@ -657,6 +644,26 @@ class BrowserController(SpotifyBrowser):
                 break
         self._elements = found
         return described
+
+    @browser_call
+    def scope_observation(self):
+        """Return read-only target evidence from the current observed page."""
+        if self._page is None:
+            return {}
+        links, targets = [], []
+        for index, target in enumerate(self._elements, 1):
+            if target.page is not self._page:
+                continue
+            try:
+                if not target.element.is_visible():
+                    continue
+                href = target.element.get_attribute("href")
+            except Exception:
+                continue
+            targets.append({"index": index, "role": target.role, "label": target.label})
+            if href:
+                links.append({"url": urljoin(self._page.url, href)})
+        return {"url": self._page.url, "links": links, "browser_targets": targets}
 
     def _assert_action_url(self, expected_url):
         expected = canonical_action_url(expected_url)

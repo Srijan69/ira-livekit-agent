@@ -206,6 +206,8 @@ export type SkillSummary = {
   failure_count: number;
   issues?: string[];
   executable?: boolean;
+  /** Explicit one-time execution is distinct from automatic eligibility. */
+  can_run_once?: boolean;
 };
 
 export type SkillDetail = SkillSummary & { markdown: string; versions: number[]; selected_version?: number; diff?: string };
@@ -214,7 +216,9 @@ export type SkillRun = {
   run_id: string;
   skill_slug: string;
   skill_name: string;
-  skill_version: number;
+  skill_version: number | string;
+  mode?: "procedure" | "compiled";
+  request_id?: string;
   status: string;
   completed_steps: number;
   total_steps: number;

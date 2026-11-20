@@ -15,7 +15,7 @@ This project includes:
   - Turn-taking is handled by Gemini's own voice activity detection, so no LiveKit turn detector is used
   - Requires `GOOGLE_API_KEY` in `.env.local`
   - Other [realtime models](https://docs.livekit.io/agents/models/realtime) are available through the plugin ecosystem
-- **An `open_app` tool** that launches desktop apps on voice command ("open Spotify") by typing into the Windows Start menu with PyAutoGUI — see [Desktop control](#desktop-control) for its limits
+- **An `open_app` tool** that launches desktop apps on voice command ("open Notepad") by typing into the Windows Start menu with PyAutoGUI — see [Desktop control](#desktop-control) for its limits
 - **Playwright web browsing** — IRA drives visible Chrome or Brave, lists page controls, and verifies requested actions. See [Web browsing](#web-browsing)
 - **Observed computer use** — fresh screen images, named desktop controls, Unicode typing, dashboard before/after previews and a subtle native target indicator. See [Desktop control](#desktop-control)
 - **Durable memory** in a local SQLite database with full-text search, so facts about you survive a restart. `remember`, `recall`, and `forget` are voice-callable. See [Memory](#memory)
@@ -204,7 +204,7 @@ Worth knowing:
 - **No separate browser driver.** `uv sync` installs Playwright. IRA uses your
   installed Chrome channel or an explicit Brave executable and keeps its
   existing persistent profiles. Missing browsers are reported without substitution.
-  Browser component updates stay enabled so Widevine DRM can initialize for Spotify.
+  Browser component updates stay enabled so installed browser components can initialize.
 - **The numbering is re-derived on every listing and thrown away after every
   click or navigation.** Stale indices are the main failure mode of this style
   of tool — saying "click three" and getting whatever is third on a page that
@@ -225,13 +225,13 @@ Worth knowing:
   check, avoiding a repeated animation-frame wait on slow pages. Iframe and
   shadow-root controls retain Playwright's native element safeguards.
 
-### Signed-in Chrome or Brave and Spotify
+### Persistent Chrome or Brave profiles
 
 Set `IRA_BROWSER=chrome` (the default) or `IRA_BROWSER=brave` before starting
 the agent. The browser reuses the Windows profile named by
 `%LOCALAPPDATA%\\IRA\\Browser`, so it can run alongside your normal browser
-without a profile-lock error. Sign in to Spotify once in IRA's browser window;
-the cookies remain available on later runs. To use a specific profile directory,
+without a profile-lock error. Site cookies remain available on later runs.
+To use a specific profile directory,
 set `IRA_BROWSER_PROFILE` to its full path.
 
 ```powershell
@@ -240,19 +240,9 @@ $env:IRA_BROWSER_PROFILE_NAME = "Default"
 uv run python src/agent.py console
 ```
 
-Save service preferences in **System Controls → Your Profile → Preferences**,
-for example, "Spotify: use Brave only." IRA reads this preference for each
-Spotify action, including navigation through the general browser tools. Missing
-Brave or failed navigation returns an error rather than opening another browser.
-
-Ask "Play Aaya Sher by Anirudh Ravichander on Spotify", or say "play", "pause",
-"rewind ten seconds", or "forward thirty seconds". Dedicated song playback
-matches the title and known artist, uses native browser input, and verifies
-now-playing identity and playback. An ambiguous title needs an artist; opening
-Spotify alone does not play a song. These controls operate on the Spotify Web
-Player tab in IRA's persistent profile. To see the saved workflow files, say
-"open the workflows folder"; IRA opens the local folder in Explorer instead of
-trying to navigate to it as a website.
+Missing Brave returns an error without opening another browser. To see the
+saved workflow files, say "open the workflows folder"; IRA opens the local
+folder in Explorer instead of trying to navigate to it as a website.
 
 All Playwright objects belong to one dedicated browser thread. Requests copy
 the current task context into that thread and marshal results back through
@@ -307,15 +297,37 @@ Implementation: [`src/personal_memory.py`](src/personal_memory.py),
 The primary procedure library uses `skills/<category>/<name>/SKILL.md`.
 Following Hermes's progressive disclosure, IRA discovers compact descriptions
 with `skills_list`, reads full instructions or supporting files with `skill_view`,
-then follows the procedure with actual tool calls and observations. Loading a
-procedure never counts as executing it. `skill_manage` edits ordinary procedures.
+then uses `run_skill` to bind a relevant procedure to the current request before
+actual tool calls and observations. Loading never counts as execution. Selection
+uses canonical identities, validated inputs and the current goal; unrelated
+skills are not fallback choices. `skill_manage` edits ordinary procedures.
 
-Optional compiled workflows remain in `workflows/`, with their existing draft
-review, allowed actions, and recorded runs. `list_skills` identifies both modes;
+Optional compiled workflows remain in `workflows/`, with draft review, checked
+actions and recorded runs. An explicitly requested, validated draft may run once
+without permanently enabling automatic reuse. `list_skills` identifies both modes;
 use `procedure:category/name` or `workflow:slug` to resolve naming collisions.
 `run_skill` on a procedure returns `procedure_ready` and instructions for IRA
 to follow; it does not run a compiled interpreter or complete the action.
 Use `IRA_WORKFLOWS_DIR` to move the compiled workflow library.
+
+Adaptive package state, immutable versions and task-bound run history live in
+`skills/.procedures.sqlite3`. The shipped `skills/reviewed.json` enables only exact
+reviewed package digests; edits, including support files, invalidate older plans.
+The Skills dashboard separates one-time execution from automatic eligibility and
+shows active adaptive runs with Stop controls. Private input values are redacted
+from run records and learned source.
+
+The `research-topic` procedure gathers actually read sources. `research_status`
+reports the current source ledger; completed research supplies a sourced summary
+to `finish_request`. Requested depth and source restrictions override defaults.
+Clearly established actions use deterministic task checks; unresolved semantics
+can use the configured judge. Stop, stale-target and uncertain-effect checks
+remain active, while unchanged tasks renew default execution checkpoints.
+
+Spotify's dedicated tools, procedure and adapters have been retired. Generic
+app/browser tools still follow explicit current requests; unrelated media actions
+cannot be substituted for research or another task. Historical evaluation records
+remain as evidence.
 
 The [November 7 execution evaluation](docs/research/2026-11-07-hermes-execution-evaluation.md)
 records the routing repairs, regression checks, live model evaluations, and
@@ -335,7 +347,7 @@ my preferences?" using the `list_preferences` tool. Remove one with the normal
 
 ### Workflow execution and terminal status
 
-Detailed workflows use explicit steps such as `spotify_control: action=play`,
+Detailed workflows use explicit steps such as `browse_to: url="https://example.com"`,
 an `allowed_tools` list, prerequisites, verification rules, and recovery notes.
 IRA executes only those declared actions and stops at the first unverified
 failure. Workflows with at most five linear deterministic steps use the
@@ -512,8 +524,7 @@ For turn-level checks that don't need a live session, the LiveKit Agents [testin
 
 These unit tests use native Playwright-shaped fixtures, injected agent browsers
 and temporary memory databases. Real browser, provider and desktop evaluations
-are opt-in and operate on isolated fixtures; the explicit Spotify evaluation
-uses IRA's authenticated browser profile.
+are opt-in and operate on isolated fixtures.
 
 Two of the persona tests are identity guards rather than feature tests: one asserts the system prompt never names a borrowed character (IRA is meant to *behave* like Iron Man's assistant, not *be* her — naming the character invites the model to play its own idea of her), and one asserts the prompt states the name isn't an acronym, since otherwise "what does IRA stand for?" gets a confidently invented expansion.
 
@@ -586,13 +597,10 @@ and Run/Stop through the connected voice agent. A draft must pass validation and
 be explicitly enabled. Startup includes a compact catalog; specialist browser,
 desktop, memory and skill-management tools load through `load_capabilities`.
 
-Included procedures are **Open Desktop App**, **Open Web Page**, and **Play
-Spotify Playlist**. For example: “Run Open Web Page” checks `example.com` for
-“Example Domain”. Specify both the app and expected title for another app, or
-the URL and expected text for another web page. Spotify uses IRA's existing
-signed-in Chrome/Brave profile and requires observed audio plus matching player
-context; a changed Spotify selector stops the procedure instead of claiming
-success.
+Included procedures are **Open Desktop App** and **Open Web Page**. For example:
+“Run Open Web Page” checks `example.com` for “Example Domain”. Specify both the
+app and expected title for another app, or the URL and expected text for another
+web page.
 
 Every strict tool step has an observable check. Invalid later steps are rejected
 before execution, run versions are frozen, duplicate deliveries are not
@@ -613,14 +621,14 @@ Startup memory shares a 4,000-character budget and removes duplicate entries.
 draft with source-run provenance. It does not train model weights. Curator
 recommendations are review-only and honor pins.
 
-Current scope: strict actions cover app launch, web navigation, Spotify and
+Current scope: strict actions cover app launch, web navigation and
 screen capture. Click/type/mouse tools remain available through capability
 loading, but are not yet compiled skill actions. Visual `looks_like`, interactive
 `ask`/`say` steps, arbitrary shell commands, autonomous model compilation,
 automatic consolidation, and conversation-history compression beyond Gemini's
 existing sliding window are not enabled. Local automated checks cover the
-contracts; live Gemini audio and signed-in Spotify still need a manual smoke
-test on the intended machine/profile.
+contracts; live Gemini audio still needs a manual smoke test on the intended
+machine/profile.
 
 Validation commands from the renamed project folder:
 

@@ -30,11 +30,7 @@ def needs_tool_continuation(request_text, report, history, available_tools):
         return False
     appropriate = set()
     if re.search(r"\b(open|launch)\b", request_text, re.I):
-        appropriate.update({"open_app", "browse_to", "open_spotify"})
-    if re.search(r"\b(play|pause)\b", request_text, re.I):
-        appropriate.update(
-            {"spotify_play_track", "spotify_play_playlist", "spotify_control"}
-        )
+        appropriate.update({"open_app", "browse_to"})
     if re.search(r"\b(browse|navigate)\b", request_text, re.I):
         appropriate.add("browse_to")
     if not appropriate.intersection(available_tools):

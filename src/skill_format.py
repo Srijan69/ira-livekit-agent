@@ -4,21 +4,21 @@ A skill is a Markdown file a person can read and edit, with just enough
 structure for the engine to run it strictly::
 
     ---
-    name: Play Favorite Playlist
-    description: Plays one of the boss's Spotify playlists in a browser.
-    phrases: put on my music; play my funk songs
+    name: Open Web Page
+    description: Opens a requested web page in a browser.
+    phrases: open the page; browse to the website
     version: 2
     source: compiled
     ---
 
     ## Goal
-    Music from {playlist} is playing in {browser}.
+    The requested page is visible in {browser}.
 
     ## Inputs
-    - playlist — which saved playlist to play. Default: "My funk songs".
+    - browser — which browser to use. Default: "Brave".
 
     ## Steps
-    1. **Open the browser** — Spotify needs a window to load in.
+    1. **Open the browser** — The page needs a window to load in.
        - do: open_app app_name={browser}
        - check: window_title contains {browser} within 8s
        - if stuck: the Start menu can be slow; open it once more.

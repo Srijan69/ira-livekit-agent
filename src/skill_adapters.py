@@ -54,26 +54,6 @@ def validate_app(app_name: str) -> None:
         raise ValueError("Provide an application name, without commands or arguments.")
 
 
-def validate_spotify(browser: str = "") -> None:
-    if browser and browser.lower() not in {"chrome", "brave"}:
-        raise ValueError("Browser must be chrome or brave.")
-
-
-def validate_playlist(name: str) -> None:
-    if not name.strip() or len(name) > 200:
-        raise ValueError("Use a playlist name of 1 to 200 characters.")
-
-
-def validate_control(
-    action: str, seconds: int = 10, *, _symbolic: frozenset[str] = frozenset()
-) -> None:
-    if (
-        "action" not in _symbolic
-        and action not in {"play", "pause", "rewind", "forward"}
-    ) or ("seconds" not in _symbolic and not 1 <= seconds <= 600):
-        raise ValueError("Use play/pause/rewind/forward with 1 to 600 seconds.")
-
-
 def validate_browser_click(
     selector: str, expected_url: str, *, _symbolic: frozenset[str] = frozenset()
 ) -> None:
@@ -289,9 +269,6 @@ class SkillToolAdapters:
                 for name in (
                     "open_app",
                     "browse_to",
-                    "open_spotify",
-                    "spotify_play_playlist",
-                    "spotify_control",
                     "capture_screen",
                     "browser_click",
                     "browser_type",
@@ -310,9 +287,6 @@ class SkillToolAdapters:
             validators={
                 "open_app": validate_app,
                 "browse_to": validate_url,
-                "open_spotify": validate_spotify,
-                "spotify_play_playlist": validate_playlist,
-                "spotify_control": validate_control,
                 "browser_click": validate_browser_click,
                 "browser_type": validate_browser_type,
                 "desktop_click": validate_desktop_click,
@@ -335,34 +309,8 @@ class SkillToolAdapters:
 
     def browse_to(self, url: str) -> ToolOutcome:
         validate_url(url)
-        try:
-            self.browser.navigate(url)
-            return ToolOutcome(True, "Navigation returned; awaiting page observation.")
-        except Exception:
-            import webbrowser
-
-            webbrowser.open(url)
-            return ToolOutcome(
-                True,
-                "Navigation opened in system browser; awaiting window observation.",
-            )
-
-    def open_spotify(self, browser: str = "") -> ToolOutcome:
-        validate_spotify(browser)
-        self.browser.open_spotify(browser or None)
-        return ToolOutcome(
-            True, "Spotify navigation returned; awaiting page observation."
-        )
-
-    def spotify_play_playlist(self, name: str) -> ToolOutcome:
-        validate_playlist(name)
-        self.browser.spotify_play_playlist(name)
-        return ToolOutcome(True, "Playlist selected; playback observed by browser.")
-
-    def spotify_control(self, action: str, seconds: int = 10) -> ToolOutcome:
-        validate_control(action, seconds)
-        self.browser.spotify_control(action, seconds)
-        return ToolOutcome(True, "Player action requested; awaiting observation.")
+        self.browser.navigate(url)
+        return ToolOutcome(True, "Navigation returned; awaiting page observation.")
 
     def capture_screen(self) -> ToolOutcome:
         capture = self.desktop.capture_screen()

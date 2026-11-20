@@ -23,6 +23,33 @@ const ready: SkillSummary = {
   failure_count: 0,
   executable: true,
 };
+
+it("runs a validated draft once without enabling automatic selection", async () => {
+  const draft = { ...ready, mode: "procedure" as const, state: "draft", executable: false,
+    can_run_once: true, procedure_name: "procedure:desktop/open-notes", use_count: 2, failure_count: 1 };
+  const onSend = vi.fn();
+  render(<Skills api={setupApi([draft])} connected activities={[]} onSend={onSend} />);
+  const run = await screen.findByRole("button", { name: "Run Open Notes" });
+  expect(run).toBeEnabled();
+  expect(screen.getByText("Draft")).toBeInTheDocument();
+  expect(screen.getByText("2 runs")).toBeInTheDocument();
+  fireEvent.click(run);
+  expect(onSend).toHaveBeenCalledWith(expect.stringContaining("procedure:desktop/open-notes"));
+});
+
+it("shows Stop for adaptive history using its canonical procedure identity", async () => {
+  const procedure = { ...ready, slug: "procedure-card-1", mode: "procedure" as const,
+    procedure_name: "procedure:desktop/open-notes", can_run_once: true };
+  const api = setupApi([procedure]);
+  api.history = async () => ({ runs: [{ ...waitingRun, skill_slug: procedure.procedure_name,
+    skill_name: "Open Notes", mode: "procedure", status: "running", question: "", question_id: "" }] });
+  const onSend = vi.fn();
+  render(<Skills api={api} connected activities={[]} onSend={onSend} />);
+  const stop = await screen.findByRole("button", { name: "Stop Open Notes" });
+  expect(screen.queryByRole("button", { name: "Run Open Notes" })).not.toBeInTheDocument();
+  fireEvent.click(stop);
+  expect(onSend).toHaveBeenCalledWith(expect.stringContaining(waitingRun.run_id));
+});
 function setupApi(entries: SkillSummary[] = [ready]) {
   let rows = entries;
   const api: SkillsApi = {
@@ -97,15 +124,15 @@ describe("skills page", () => {
     expect(sent).toHaveBeenCalledWith('Run the saved skill "workflow:notes".');
   });
   it("runs a procedural skill by its canonical name and hides compiled controls", async () => {
-    const procedure = { ...ready, slug: "procedure-123", name: "Play Spotify", mode: "procedure" as const, procedure_name: "procedure:media/play-spotify", state: "ready", version: "1.0.0" };
+    const procedure = { ...ready, slug: "procedure-123", name: "Open Web Page", mode: "procedure" as const, procedure_name: "procedure:web/open-web-page", state: "ready", version: "1.0.0" };
     const api = setupApi([procedure]);
     api.detail = async () => ({ skill: { ...procedure, markdown: "Read and follow these instructions", versions: [] } });
     const sent = vi.fn();
     render(<Skills api={api} connected onSend={sent} activities={[]} />);
-    fireEvent.click(await screen.findByRole("button", { name: "Run Play Spotify" }));
-    expect(sent).toHaveBeenCalledWith(expect.stringContaining("procedure:media/play-spotify"));
-    expect(screen.queryByRole("button", { name: "Archive Play Spotify" })).not.toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "Details for Play Spotify" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Run Open Web Page" }));
+    expect(sent).toHaveBeenCalledWith(expect.stringContaining("procedure:web/open-web-page"));
+    expect(screen.queryByRole("button", { name: "Archive Open Web Page" })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Details for Open Web Page" }));
     expect(await screen.findByText("Read and follow these instructions")).toBeInTheDocument();
     expect(screen.queryByRole("combobox", { name: "Skill version" })).not.toBeInTheDocument();
   });

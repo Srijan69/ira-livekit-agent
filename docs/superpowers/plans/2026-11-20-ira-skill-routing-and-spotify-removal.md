@@ -1,5 +1,7 @@
 # IRA Skill Routing and Spotify Removal Implementation Plan
 
+**Implementation update:** The user authorized implementation and approved the reviewed gate choices on 20 November 2026. Those choices supersede the stricter gates in the original planning text below: deterministic established actions do not need provider approval; explicit validated draft runs need no separate permanent enablement; skill defaults cannot override current supported user intent; active tasks renew default checkpoints; Spotify integration is removed without a generic site/app blacklist; clarification is limited to consequential unresolved inputs. Structural validation, current-task/target checks, cancellation, fresh evidence, duplicate/uncertain-effect protection, and honest completion remain.
+
 > **For agentic workers:** Use superpowers:subagent-driven-development or superpowers:executing-plans only when implementation is requested. The checkboxes below describe future work.
 
 **Goal:** Remove IRA's Spotify automation and ensure that skill selection, workflow execution, recovery, and completion serve the current human request.

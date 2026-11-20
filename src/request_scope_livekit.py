@@ -87,7 +87,6 @@ _LOCAL_READS = frozenset(
         "inspect_skill",
         "view_skill",
         "skill_view",
-        "skill_manage",
         "describe_page",
         "tool_mastery_status",
         "list_workflows",
@@ -97,12 +96,24 @@ _STOP_TOOLS = frozenset({"stop_actions", "stop_skill"})
 
 
 class RequestScopeTools:
+    """Bind exported calls and emit redacted settlement/closure notifications.
+
+    on_completion reports admitted closure. Its boolean does not prove a saved
+    procedure's declared done_when criteria; the consumer verifies those from
+    actual evidence before storing a successful run.
+    """
+
     def __init__(
         self,
         scope: RequestScope,
         *,
         observation=None,
         on_stop=None,
+        on_action=None,
+        on_completion=None,
+        completion_check=None,
+        before_action=None,
+        on_request_changed=None,
         final_transcript_timeout=2.0,
     ):
         if final_transcript_timeout <= 0:
@@ -111,6 +122,11 @@ class RequestScopeTools:
         self.scope = scope
         self.observation = observation
         self.on_stop = on_stop
+        self.on_action = on_action
+        self.on_completion = on_completion
+        self.completion_check = completion_check
+        self.before_action = before_action
+        self.on_request_changed = on_request_changed
         self._session = None
         self._callbacks = []
         self._speeches = OrderedDict()
@@ -120,6 +136,7 @@ class RequestScopeTools:
         self._clarification = None
         self._continuations = OrderedDict()
         self._background = set()
+        self._notification_jobs = set()
         self._running = {}
         self._activity_revision = 0
         self._reviewed = set()
@@ -158,6 +175,7 @@ class RequestScopeTools:
 
     def _background_done(self, task):
         self._background.discard(task)
+        self._notification_jobs.discard(task)
         if not task.cancelled():
             task.exception()
 
@@ -235,7 +253,9 @@ class RequestScopeTools:
             return
         revision = self._activity_revision
         try:
-            await self.scope.assess_completion(request.id, report, self._metadata())
+            observation = self._metadata()
+            self._check_completion(request.id, report, observation)
+            await self.scope.assess_completion(request.id, report, observation)
             # A new tool can start (and even finish) while the judge awaits.
             # Both identity and work revision must still match the reviewed turn.
             if revision != self._activity_revision or not self._can_review(
@@ -248,6 +268,82 @@ class RequestScopeTools:
             # effects are issued by this fallback, even for unresolved closure.
             return
         self._continuations.pop(request.id, None)
+        await self._notify_callback(
+            self.on_completion, request.id, True, "Verified request completion"
+        )
+
+    def _check_completion(self, request_id, report, observation):
+        if self.completion_check is None:
+            return
+        try:
+            ready = self.completion_check(request_id, report, observation)
+        except Exception as exc:
+            raise ScopeViolation(
+                "Completion evidence is unavailable", status="incomplete_request"
+            ) from exc
+        if not ready:
+            raise ScopeViolation(
+                "Research sources have not been verified; continue the current task or report a partial result",
+                status="incomplete_request",
+            )
+
+    async def _notify_callback(self, callback, *args):
+        """Evidence persistence is optional and cannot change the host outcome."""
+        if callback is None:
+            return
+        try:
+            result = callback(*args)
+            if inspect.isawaitable(result):
+                await result
+        except Exception as exc:
+            logger.warning(
+                "Request evidence callback failed type=%s", type(exc).__name__
+            )
+
+    def _schedule_callback(self, callback, *args):
+        """Drain notifications for already-settled input/closure on shutdown."""
+        if callback is None:
+            return
+        try:
+            result = callback(*args)
+            if inspect.isawaitable(result):
+                task = asyncio.create_task(self._notify_callback(lambda: result))
+                self._background.add(task)
+                self._notification_jobs.add(task)
+                task.add_done_callback(self._background_done)
+        except Exception as exc:
+            logger.warning(
+                "Request evidence callback failed type=%s", type(exc).__name__
+            )
+
+    def _request_changed(self, old_request, new_request):
+        if old_request is not None and old_request.id != new_request.id:
+            self._schedule_callback(
+                self.on_request_changed, old_request.id, new_request.id
+            )
+
+    async def _validate_action(self, request_id, name, arguments):
+        """A validator may refuse execution; arguments stay in active memory only."""
+        if self.before_action is None:
+            return
+        snapshot = json.loads(json.dumps(dict(arguments), allow_nan=False))
+        result = self.before_action(request_id, name, snapshot)
+        if inspect.isawaitable(result):
+            result = await result
+        if result is False:
+            raise ScopeViolation(
+                "The selected procedure no longer supports this action"
+            )
+
+    async def _notify_action(self, permit, outcome):
+        if permit.proposal.kind != "orchestrate":
+            await self._notify_callback(
+                self.on_action,
+                permit.request_id,
+                permit.proposal.name,
+                outcome,
+                {"argument_names": sorted(permit.proposal.arguments)},
+            )
 
     @contextmanager
     def _track(self, binding):
@@ -338,6 +434,7 @@ class RequestScopeTools:
     async def _execute_with_permit(
         self, binding, name, arguments, operation, *, kind, observation
     ):
+        await self._validate_action(binding.request.id, name, arguments)
         permit = await self.scope.admit(
             binding.request.id,
             ActionProposal(
@@ -348,6 +445,11 @@ class RequestScopeTools:
             ),
         )
         try:
+            # The selected document can change while policy IO awaits. No
+            # await separates this last validation from permit use and invoke.
+            await self._validate_action(
+                binding.request.id, name, permit.proposal.arguments
+            )
             self.scope.consume(permit)
         except BaseException:
             self.scope.record(
@@ -379,12 +481,14 @@ class RequestScopeTools:
                 else "uncertain"
             )
             self.scope.record(permit, outcome, type(exc).__name__)
+            await self._notify_action(permit, outcome)
             raise
         else:
             outcome = "done" if getattr(result, "ok", None) is True else "returned"
             if getattr(result, "ok", None) is False:
                 outcome = "error"
             self.scope.record(permit, outcome, str(result))
+            await self._notify_action(permit, outcome)
             return result
         finally:
             _action.reset(action_token)
@@ -682,10 +786,15 @@ class RequestScopeTools:
         binding = _binding.get()
         if binding is None or binding.scope is not self.scope:
             raise ScopeViolation("No request is bound to this completion")
+        self.scope.require(binding.request.id)
+        self._check_completion(binding.request.id, "", self._metadata())
         self.scope.finish(binding.request.id)
         self._invalidate_voice()
         self._waiting.clear()
         self._clarification = None
+        self._schedule_callback(
+            self.on_completion, binding.request.id, True, "Verified request completion"
+        )
         return "Request closed. Report only outcomes supported by actual observations."
 
     def attach_session(self, session):
@@ -711,13 +820,18 @@ class RequestScopeTools:
 
     def _on_close(self, _event):
         self._closed = True
-        self.scope.revoke("Session closed")
+        request = self.scope.current_request
+        if request is None or not self.scope.was_finished(request.id):
+            self.scope.revoke("Session closed")
         self._invalidate_voice()
 
     async def aclose(self):
         """Call after owned host jobs settle; detach events and close owned policy IO."""
         self._closed = True
-        self.scope.revoke("Request admission closed")
+        request = self.scope.current_request
+        normally_finished = request is not None and self.scope.was_finished(request.id)
+        if not normally_finished:
+            self.scope.revoke("Request admission closed")
         if self._session is not None:
             for event, callback in self._callbacks:
                 self._session.off(event, callback)
@@ -734,9 +848,20 @@ class RequestScopeTools:
         self._speech_sources.clear()
         self._reviewed.clear()
         for task in self._background:
-            task.cancel()
+            if task not in self._notification_jobs:
+                task.cancel()
         if self._background:
             await asyncio.gather(*self._background, return_exceptions=True)
+        if normally_finished:
+            # Normal finish already invalidated every permit. Preserve its
+            # read receipt only while settled history notifications drain.
+            self.scope.revoke("Request admission closed")
+        self.before_action = None
+        self.on_request_changed = None
+        self.on_action = None
+        self.on_completion = None
+        self.completion_check = None
+        self.on_stop = None
         close = getattr(self.scope.judge, "aclose", None)
         if close is not None:
             await close()
@@ -844,7 +969,9 @@ class RequestScopeTools:
             self.scope.suspend("User is speaking; await the finalized instruction")
             self._signal_binding_changed()
             return
+        old_request = self.scope.current_request
         request = self.scope.begin_request(clean_text, source_id=f"voice:{source}")
+        self._request_changed(old_request, request)
         self._final_voice_requests[source] = request
         while len(self._final_voice_requests) > 256:
             self._final_voice_requests.popitem(last=False)
@@ -860,9 +987,11 @@ class RequestScopeTools:
             raise ScopeViolation("Session closed", status="session_closed")
         self._invalidate_voice()
         stream_id = getattr(getattr(event, "info", None), "stream_id", None)
+        old_request = self.scope.current_request
         request = self.scope.begin_request(
             event.text, source_id=f"text:{stream_id or uuid.uuid4().hex}"
         )
+        self._request_changed(old_request, request)
         token = _binding.set(_Binding(self.scope, request))
         try:
             async with session._claim_user_turn():

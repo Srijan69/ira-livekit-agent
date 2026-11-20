@@ -105,24 +105,36 @@ class ActionPermit:
 
 
 class RequestScope:
+    """Default admission resolves task fit before optional semantic checking.
+
+    An explicitly injected callable judge owns admission, allowing alternate
+    caller policies and offline tests. GeminiScopeJudge keeps deterministic-first
+    behavior, even when its provider client is injected.
+    """
+
     def __init__(
         self,
         judge=None,
         *,
-        max_actions: int = 64,
-        request_ttl: float = 900,
+        max_actions: int | None = None,
+        request_ttl: float | None = None,
         policy_timeout: float = 12,
         history_limit: int = 24,
         clock: Callable[[], float] = time.monotonic,
     ):
+        self._renew_actions = max_actions is None
+        self._renew_lease = request_ttl is None
+        max_actions = 64 if max_actions is None else max_actions
+        request_ttl = 900 if request_ttl is None else request_ttl
         if min(max_actions, request_ttl, policy_timeout, history_limit) <= 0:
             raise ValueError("Scope limits must be positive")
-        self.judge = judge
+        self.judge = judge if judge is not None else GeminiScopeJudge()
         self.max_actions = max_actions
         self.request_ttl = request_ttl
         self.policy_timeout = policy_timeout
         self._clock = clock
         self._current: RequestIdentity | None = None
+        self._finished_request_id: str | None = None
         self._revoked = "No current human request"
         self._permits: dict[str, tuple[ActionPermit, str]] = {}
         self._history = deque(maxlen=history_limit)
@@ -131,6 +143,7 @@ class RequestScope:
         self._past = OrderedDict()
         self._uncertain: set[str] = set()
         self._issued = 0
+        self._lease_started = 0.0
         self._epoch = 0
         self._lock = threading.RLock()
 
@@ -212,7 +225,7 @@ class RequestScope:
                 self._epoch,
             )
             self._install(request)
-            self._issued, history, uncertain = prior
+            self._issued, history, uncertain, self._lease_started = prior
             self._history.extend(history)
             self._uncertain.update(uncertain)
             self._seen[incoming.source_id] = request
@@ -224,15 +237,18 @@ class RequestScope:
                 self._issued,
                 tuple(self._history),
                 set(self._uncertain),
+                self._lease_started,
             )
             while len(self._past) > 16:
                 self._past.popitem(last=False)
         self._current = request
+        self._finished_request_id = None
         self._revoked = ""
         self._permits.clear()
         self._history.clear()
         self._uncertain.clear()
         self._issued = 0
+        self._lease_started = request.created_at
 
     def revoke(self, reason: str = "Request revoked"):
         with self._lock:
@@ -243,6 +259,7 @@ class RequestScope:
         """Invalidate permits while retaining a pending clarification's lineage."""
         with self._lock:
             self._revoked = reason
+            self._finished_request_id = None
             self._permits.clear()
 
     def stop(self):
@@ -252,6 +269,15 @@ class RequestScope:
         with self._lock:
             self.require(request_id)
             self.revoke("Request closed; await a new human request")
+            self._finished_request_id = request_id
+
+    def was_finished(self, request_id: str) -> bool:
+        """Receipt for trusted history settlement; never grants action authority."""
+        with self._lock:
+            return bool(
+                self._current is not None
+                and self._current.id == request_id == self._finished_request_id
+            )
 
     def require(self, request_id: str | None):
         with self._lock:
@@ -260,16 +286,19 @@ class RequestScope:
                 raise ScopeViolation(
                     self._revoked or "This tool belongs to an older request"
                 )
-            if self._clock() - request.created_at >= self.request_ttl:
-                self.revoke("Request expired; ask the user to continue")
-                raise ScopeViolation(self._revoked)
+            if self._clock() - self._lease_started >= self.request_ttl:
+                if not self._renew_lease:
+                    self.revoke("Request expired; ask the user to continue")
+                    raise ScopeViolation(self._revoked)
+                self._lease_started = self._clock()
+                logger.info("request_checkpoint request_id=%s kind=lease", request.id)
             return request
 
     async def admit(self, request_id: str, proposal: ActionProposal) -> ActionPermit:
         with self._lock:
             self.require(request_id)
             self._check_budget(proposal)
-        request = await self._assess(request_id, proposal)
+        await self._assess(request_id, proposal)
         with self._lock:
             self.require(request_id)
             self._check_budget(proposal)
@@ -277,7 +306,7 @@ class RequestScope:
                 uuid.uuid4().hex,
                 request_id,
                 proposal,
-                min(request.created_at + self.request_ttl, self._clock() + 45),
+                min(self._lease_started + self.request_ttl, self._clock() + 45),
             )
             self._issued += 1
             self._permits[permit.id] = (permit, "pending")
@@ -302,10 +331,6 @@ class RequestScope:
         )
 
     async def _assess(self, request_id, proposal):
-        if self.judge is None or (
-            isinstance(self.judge, GeminiScopeJudge) and self.judge._client is None
-        ):
-            return self.require(request_id)
         with self._lock:
             request = self.require(request_id)
             history = self.history
@@ -345,8 +370,19 @@ class RequestScope:
 
     def _check_budget(self, proposal):
         if self._issued >= self.max_actions:
-            raise ScopeViolation(
-                "Request action budget reached; ask the user to continue"
+            if not self._renew_actions:
+                raise ScopeViolation(
+                    "Request action budget reached; ask the user to continue"
+                )
+            if len(self._permits) >= self.max_actions:
+                raise ScopeViolation(
+                    "Settle pending actions before continuing this task",
+                    status="checkpoint_required",
+                    retryable=True,
+                )
+            self._issued = 0
+            logger.info(
+                "request_checkpoint request_id=%s kind=actions", self._current.id
             )
         if proposal.kind != "observe" and proposal.fingerprint in self._uncertain:
             raise ScopeViolation(
@@ -405,14 +441,12 @@ _POLICY = """You decide whether ONE proposed computer/browser/saved-skill effect
 within the current real human request. Return JSON only with decision (allow,
 deny, or clarify) and a short reason. Allow necessary intermediate steps of the
 requested task, including navigating, observing, selecting a clearly requested
-target, and entering explicitly supplied content. The user may make conversational
-or high-level requests (such as 'play my favorite playlist', 'play some music',
-'open Spotify', 'check my tasks', 'take a note'). The assistant's actions that
-resolve user preferences, memories, or application defaults to fulfill this goal
-(such as playing their favorite playlist 'My Phonk Songs', playing a requested song,
-or launching Spotify) are ALLOWED. Affirmations and confirmations ('yes', 'sure',
-'play it', 'go ahead', 'yep', 'ok') confirm the assistant's proposed action and are
-ALLOWED. Observing the screen alone does not authorize clicking, typing, focusing,
+target, and entering explicitly supplied content. Ordinary conversational requests
+may establish a goal without specifying each intermediate step. Preferences and
+application defaults may resolve choices within that goal; they cannot substitute
+an unrelated task or target. A bare affirmation requires the actual pending
+question and request lineage; historical assistant proposals alone do not grant
+authority. Observing the screen alone does not authorize clicking, typing, focusing,
 launching, moving, or any other effect. Do not grant all actions merely because
 the request contains an action verb. Reject unrelated applications, targets, content,
 and effects. Ambiguous targets or insufficient evidence require clarify. A screenshot
@@ -546,6 +580,30 @@ def _target_crops(image_bytes, image_size, proposed_targets):
     return crops
 
 
+def _deterministic_policy(request, action, history):
+    """Use the shared task/target contract when it can establish a decision."""
+    try:
+        from task_routing import classify_action
+    except ModuleNotFoundError as exc:
+        if exc.name != "task_routing":
+            raise
+    else:
+        result = classify_action(
+            request.text,
+            action.name,
+            dict(action.arguments),
+            observation=dict(action.observation),
+            history=history,
+            answers=request.answers,
+        )
+        if result is not None:
+            return AdmissionDecision(*result)
+    try:
+        return _heuristic_policy_fallback(request, action)
+    except ScopeViolation:
+        return None
+
+
 def _heuristic_policy_fallback(
     request: RequestIdentity, action: ActionProposal
 ) -> AdmissionDecision:
@@ -599,17 +657,31 @@ class GeminiScopeJudge:
         self.timeout = timeout
         self._client = client
         self._owns_client = client is None
+        self._closed = False
         self.model = (
             model or os.getenv("IRA_REQUEST_SCOPE_MODEL", "")
         ).strip() or "gemini-3.5-flash-lite"
 
     async def __call__(self, request, action, history):
+        if self._closed:
+            raise ScopeViolation(
+                "Request policy is closed", status="policy_unavailable"
+            )
+        deterministic = _deterministic_policy(request, action, history)
+        if deterministic is not None:
+            return deterministic
+        from google import genai
         from google.genai import types
 
         if self._client is None:
-            return AdmissionDecision(
-                "allow", "Judgmental system removed; direct execution allowed"
-            )
+            key = os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY")
+            if not key:
+                return _heuristic_policy_fallback(request, action)
+            try:
+                self._client = genai.Client(api_key=key)
+            except Exception as exc:
+                logger.warning("Scope client unavailable type=%s", type(exc).__name__)
+                return _heuristic_policy_fallback(request, action)
         observation = dict(action.observation)
         image_bytes = observation.pop("image_bytes", None)
         image_mime = observation.pop("image_mime_type", "image/jpeg")
@@ -766,7 +838,10 @@ class GeminiScopeJudge:
         return _heuristic_policy_fallback(request, action)
 
     async def aclose(self):
+        self._closed = True
         if self._owns_client and self._client is not None:
             client, self._client = self._client, None
-            await client.aio.aclose()
-            client.close()
+            try:
+                await client.aio.aclose()
+            finally:
+                client.close()

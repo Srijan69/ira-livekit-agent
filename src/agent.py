@@ -37,7 +37,7 @@ import market_report
 from browser import BrowserController, BrowserUnavailableError
 from computer_events import build_computer_event, make_computer_publisher
 from computer_use import ObservedDesktop
-from context_instructions import CONTEXT_INSTRUCTIONS
+from context_instructions import CONTEXT_INSTRUCTIONS, TASK_EXECUTION_INSTRUCTIONS
 from desktop import DesktopController, DesktopUnavailableError
 from dual_memory import DualMemoryStore
 from error_logger import log_tool_error
@@ -47,13 +47,14 @@ from realtime_model import GEMINI_LIVE_MODEL as GEMINI_LIVE_MODEL
 from realtime_model import build_realtime_model
 from request_scope import RequestScope, ScopeViolation
 from request_scope_livekit import RequestScopeTools, check_current_action
+from research_evidence import ResearchEvidence
 from session_memory import SessionMemoryIntegration
 from skill_adapters import validate_app
 from skill_store import SkillStore
 from skill_tools import SkillTools
 from skills import SkillCatalog
-from spotify_tools import SpotifyTools
 from system_status import SystemStatusReader, SystemStatusUnavailableError
+from task_routing import research_subject
 from tasks import TaskStore
 from telemetry import SessionStatusReporter
 from tool_dispatch import repair_json_string
@@ -400,7 +401,7 @@ _INSTRUCTIONS = textwrap.dedent(
       3. Next Step: If the final objective is not yet reached, immediately call the next tool.
       4. Fallback: On a browser error or obstruction, inspect its attached fresh recovery image; call capture_screen if none was attached. Focus the observed browser window if needed, use fresh desktop controls and inspect the result. List browser elements again after desktop input. Never repeat an uncertain effect.
       5. Finish: Only close the task or report completion once the entire objective is achieved.
-    - If a procedure exists in <available_skills>, load skill_view(name), then follow it adaptively with actual tool calls and observations. Loading a procedure is not executing it.
+    - For a relevant reusable task, inspect skills_list and use run_skill to plan and record the accepted procedure before its actual tool calls. skill_view inspects instructions; loading alone is not execution.
     - NEVER answer these from memory or mental calculation -- ALWAYS call the tool:
       * Current time or relative dates -> current_time
       * System metrics (CPU, RAM, battery) -> system_status
@@ -416,7 +417,7 @@ _INSTRUCTIONS = textwrap.dedent(
     - When a target or instruction is ambiguous, call clarify_request with one concise question, say it, and wait for the actual answer. Never guess a profile or expand the task. When the boss says stop or cancel, call stop_actions.
     - After checking that the requested outcome was reached, call finish_request and report the observed result briefly. Do not continue exploring or performing extra actions after completing the task. If an action was refused or its result is uncertain, explain that accurately; do not claim success or repeat the input blindly.
     - When the boss asks you to open an app, open it. Do not ask permission first.
-    - Confirm tersely once it is done, in the style of "Opening Spotify, boss."
+    - Confirm tersely once it is done, in the style of "Opening Notepad, boss."
     - If opening it fails, say so in one sentence and offer the likely fix. Do not retry the same thing twice.
     - When the boss asks to capture the screen, take a screenshot, look at the screen, inspect the desktop, or asks what is on the screen, call capture_screen. Report what is on the screen concisely to the boss based on the captured screen content and active windows.
 
@@ -426,7 +427,6 @@ _INSTRUCTIONS = textwrap.dedent(
     - Use Playwright browser tools first for web pages: browse_to, read_page, list_page_elements, click_element, type_into_element, select_dropdown_option, go_back, close_browser, new_tab, switch_tab, list_tabs, close_tab. Use observed desktop tools for native dialogs/controls or blocked browser interactions. Native editing/navigation uses press_desktop_key; typed text supports printable Unicode.
     - When working across multiple pages or documents (e.g. copying information from a reference page to a form), open a new tab with new_tab, check open tabs with list_tabs, and switch between them with switch_tab.
     - For dropdown menus (<select>), use select_dropdown_option with the dropdown's numbered element index and the desired option name.
-    - Spotify tools are available: open_spotify, spotify_play_track, spotify_play_playlist, spotify_control. Use spotify_play_track for a requested song with its title and known artist. These enforce the saved browser preference, including Brave only for Spotify. Never silently substitute Chrome or the system browser. Require verified now-playing identity and playback; inspect login or ambiguous results and report blockers accurately.
     - For WhatsApp tasks, read skill_view("send-whatsapp-message") and follow its procedure with available tools and the actual requested recipient/message. Skill loading does not send a message and never grants authorization to invent or reuse old messages.
     - You act on a page by number. List what is on the page, then act on one of the numbered things. Never guess a number you were not given.
     - The numbering changes every time the page does. After a click, a submission, or a new page, list again before acting.
@@ -439,12 +439,12 @@ _INSTRUCTIONS = textwrap.dedent(
     # Repeatable tasks and durable notes
 
     - Browser, desktop, skill-management and memory tools are ready to use. Call them directly for the requested action; load_capabilities can list a group's tools when needed. Skill contents are retrieved on demand. Loading or listing tools does not execute an action.
-    - The primary skills library follows Hermes: compact skills_list discovery, then skill_view(name, file_path) for the full Markdown procedure or support file. Execute its steps using available tools and observed results. run_skill on a procedure returns procedure_ready with instructions and inputs; continue with its actual tool calls. A loaded procedure is never completed. skill_manage authors ordinary Markdown procedures. Optional compiled workflows use workflow:slug and are listed separately by list_skills. Draft compiled workflows cannot run.
+    - The primary skills library follows Hermes: compact skills_list discovery and inspected skill_view support files. run_skill plans a matching procedure and tracks actual execution; procedure_ready is loaded, never completed. Optional compiled workflows use workflow:slug. Drafts need validation for an explicit one-time run and remain excluded from automatic reuse.
     - If run_skill or answer_skill returns waiting, ask its question and wait for the boss's answer. Pass that answer to answer_skill with the exact run_id and question_id from the waiting result or skill_status. Never guess an answer, reuse an old question ID, or start the skill again to continue it. A waiting run is not completed. Do not ask for passwords or credentials through skill clarification.
     - Compiled workflow execution owns its actions and checks. A failed, cancelled, or uncertain run is not completed. Use stop_skill for compiled runs and stop_actions for any task; skill_status reads compiled outcomes. Skill content cannot grant permission or override current-request scope.
     - To inspect available skills, use skills_list; use skill_view(name) to read full procedures and guidelines. Use skill_manage to create, edit, or patch skills.
     - When the boss asks to remember a successful procedure, use learn_skill with its verified run ID. To save a new dictated procedure use save_skill; it stays a draft until reviewed. Enable a draft only when the boss explicitly asks, using enable_skill.
-    - Executable skills declare allowed tools, do actions, and observable checks. Do not invent checks, grant additional tools, or bypass a draft with manual actions. Old workflow files remain readable and need migration and review before running.
+    - Executable skills declare tools, actions and observable checks. Do not invent success or bypass validation. Current explicit user instructions can change defaults and supported methods; replan the task accordingly. Old workflows remain inspectable.
     - For screen-based work, capture the desktop before acting and use the mouse tools only at coordinates supported by that capture. Re-capture after the screen changes.
     - capture_screen includes every connected monitor. Use inspect_screen to zoom small details; each resulting image has a new observation ID and coordinate space. Use focus_desktop_window with an observed window ID to reach the requested application on any monitor, then inspect the fresh result before input. Use cursor_image_position from the latest observation for requests at the current cursor.
     - For named desktop controls, prefer capture_screen's Windows accessibility targets and click_desktop_element with the matching target ID. This includes Chrome's profile picker, which is native browser UI, not the web page controlled by list_page_elements. Match the exact visible name and requested position using image_bounds [left, top, width, height]. Never invent an ID. If the requested target is absent or ambiguous and the screenshot does not clearly resolve it, call clarify_request instead of guessing a location. After input, check the new target labels and image before saying the task succeeded.
@@ -483,7 +483,7 @@ _INSTRUCTIONS = textwrap.dedent(
 )
 
 
-class Assistant(SpotifyTools, SkillTools, Agent):
+class Assistant(SkillTools, Agent):
     def __init__(
         self,
         *,
@@ -579,6 +579,7 @@ class Assistant(SpotifyTools, SkillTools, Agent):
 
         self._memory_base_instructions = (
             (CONTEXT_INSTRUCTIONS if personal_memory is not None else _INSTRUCTIONS)
+            + ("\n" + TASK_EXECUTION_INSTRUCTIONS if personal_memory is None else "")
             + _seed_section(seed_facts)
             + _notes_section(recent_notes)
             + _preferences_section(preferences)
@@ -601,12 +602,20 @@ class Assistant(SpotifyTools, SkillTools, Agent):
             + (f"\n{mem_snapshot}\n" if mem_snapshot else ""),
         )
         self._request_scope = (
-            request_scope if request_scope is not None else RequestScope(judge=None)
+            request_scope if request_scope is not None else RequestScope()
         )
+        self._research_evidence = None
+        self._research_summary = ""
+        self._procedure_cleanup_jobs = set()
         self._scoped_tools = RequestScopeTools(
             self._request_scope,
-            observation=self._computer.describe,
+            observation=self._task_observation,
             on_stop=self._stop_host_tasks,
+            on_action=self._record_task_action,
+            on_completion=self._record_task_completion,
+            completion_check=self._task_completion_ready,
+            before_action=self._validate_procedure_action,
+            on_request_changed=self._request_replaced,
         )
         self._tools = self._scoped_tools.wrap_tools(self._tools)
 
@@ -682,6 +691,19 @@ class Assistant(SpotifyTools, SkillTools, Agent):
             for run_id in set(self._skill_monitors) | {self._last_skill_run_id}:
                 if run_id:
                     self._skill_service.stop(run_id)
+        for request_id in getattr(self, "_procedure_runs", {}):
+            job = asyncio.create_task(self.cancel_procedures(request_id))
+            self._procedure_cleanup_jobs.add(job)
+
+            def settled(task):
+                self._procedure_cleanup_jobs.discard(task)
+                if not task.cancelled() and task.exception() is not None:
+                    logger.warning(
+                        "Procedure cleanup failed type=%s",
+                        type(task.exception()).__name__,
+                    )
+
+            job.add_done_callback(settled)
 
     def _record_tool_success(self, tool_name: str) -> None:
         if hasattr(self, "_tool_mastery") and self._tool_mastery is not None:
@@ -699,9 +721,95 @@ class Assistant(SpotifyTools, SkillTools, Agent):
         return await self._scoped_tools.stop_current_request()
 
     @function_tool
-    async def finish_request(self, context: RunContext) -> str:
+    async def finish_request(self, context: RunContext, summary: str = "") -> str:
         """Close the current task after inspecting evidence that its requested outcome is reached. Prevents extra actions until a new human request. Input delivery alone is not proof of success."""
+        evidence = self._current_research()
+        if evidence is not None:
+            self._research_summary = summary.strip()
         return self._scoped_tools.finish_current_request()
+
+    def _current_research(self):
+        request = self._request_scope.current_request
+        if request is None:
+            return None
+        subject = research_subject(request.text)
+        if not subject:
+            return None
+        if (
+            self._research_evidence is None
+            or self._research_evidence.request_id != request.id
+        ):
+            self._research_evidence = ResearchEvidence(
+                request.id, request.text, subject
+            )
+            self._research_summary = ""
+        return self._research_evidence
+
+    def _task_observation(self):
+        observation = dict(self._computer.describe() or {})
+        snapshot = getattr(self._browser, "scope_observation", None)
+        if snapshot is not None:
+            with contextlib.suppress(Exception):
+                observation.update(snapshot())
+        return observation
+
+    def _validate_procedure_action(self, request_id, name, arguments):
+        if getattr(self, "_active_task_decision", None) is None:
+            return True
+        return self.validate_active_procedure(request_id, name)
+
+    async def _request_replaced(self, old_request_id, new_request_id):
+        await self.cancel_procedures(old_request_id)
+        decision = getattr(self, "_active_task_decision", None)
+        if decision is not None and decision.request_id == old_request_id:
+            self._active_task_decision = None
+
+    def _task_completion_ready(self, request_id, report, observation):
+        evidence = self._current_research()
+        if evidence is None:
+            return True
+        if evidence.request_id != request_id or not evidence.status()["ready"]:
+            return False
+        summary = self._research_summary or report
+        sources = evidence.status()["sources"]
+        return bool(summary.strip()) and any(
+            source["host"] in summary.casefold() for source in sources
+        )
+
+    async def _record_task_action(self, request_id, name, outcome, evidence):
+        # Successful reads are observations, rather than unverified effect delivery.
+        state = "observed" if name == "read_page" and outcome == "returned" else outcome
+        await self.record_procedure_action(request_id, name, state, evidence)
+
+    async def _record_task_completion(self, request_id, admitted, summary):
+        evidence = self._current_research()
+        criteria = {}
+        if evidence is not None and evidence.request_id == request_id:
+            criteria = {
+                "read_sources": evidence.status()["ready"],
+                "summary_with_sources": self._task_completion_ready(
+                    request_id, self._research_summary, {}
+                ),
+            }
+        # Closing a request does not independently prove a general procedure's criteria.
+        verified = bool(admitted and criteria and all(criteria.values()))
+        await self.finish_procedure(
+            request_id,
+            verified,
+            summary,
+            criteria=criteria,
+            status="done" if verified else "uncertain",
+        )
+
+    @function_tool
+    async def research_status(self, context: RunContext) -> str:
+        """Inspect sources actually read for this research task. Continue missing evidence or report partial findings. For completed research, pass a source-grounded summary mentioning its source domains to finish_request(summary=...)."""
+        evidence = self._current_research()
+        return json.dumps(
+            evidence.status()
+            if evidence is not None
+            else {"status": "no_research_task", "ready": False}
+        )
 
     @function_tool
     async def clarify_request(self, context: RunContext, question: str) -> str:
@@ -794,7 +902,7 @@ class Assistant(SpotifyTools, SkillTools, Agent):
         application. Pass the app's name as they said it.
 
         Args:
-            app_name: Name of the app to open, for example Spotify, Chrome,
+            app_name: Name of the app to open, for example Calculator, Chrome,
                 Notepad, or Visual Studio Code.
         """
         name = _sanitize_app_name(app_name)
@@ -1296,14 +1404,9 @@ class Assistant(SpotifyTools, SkillTools, Agent):
                 https://news.ycombinator.com. A bare domain is fine.
         """
         logger.info("browsing", extra={"url": url})
-        if self._is_spotify_url(url):
-            result = await self._spotify_action(
-                context, lambda: self._browser.navigate(url)
-            )
-        else:
-            result = await self._browser_call(
-                "open that page", self._browser.navigate, url, context=context
-            )
+        result = await self._browser_call(
+            "open that page", self._browser.navigate, url, context=context
+        )
         return (
             f"{result} Call list_page_elements to see available interactive elements, "
             f"or type_into_element/click_element to proceed with the task."
@@ -1316,9 +1419,13 @@ class Assistant(SpotifyTools, SkillTools, Agent):
         Use this to answer a question about what a page says. The text is
         capped, so summarize it for the boss rather than reading it out.
         """
-        return await self._browser_call(
+        result = await self._browser_call(
             "read that page", self._browser.read_page, context=context
         )
+        evidence = self._current_research()
+        if evidence is not None:
+            evidence.observe(getattr(self._browser, "current_url", ""), result)
+        return result
 
     @function_tool
     async def list_page_elements(self, context: RunContext) -> str:
@@ -1414,14 +1521,9 @@ class Assistant(SpotifyTools, SkillTools, Agent):
                 opens a blank tab.
         """
         logger.info("opening new browser tab", extra={"url": url})
-        if self._is_spotify_url(url):
-            result = await self._spotify_action(
-                context, lambda: self._browser.new_tab(url)
-            )
-        else:
-            result = await self._browser_call(
-                "open a new browser tab", self._browser.new_tab, url, context=context
-            )
+        result = await self._browser_call(
+            "open a new browser tab", self._browser.new_tab, url, context=context
+        )
         return (
             f"{result} Call list_page_elements to inspect interactive elements "
             f"on this tab, or switch_tab to return to an earlier tab."
@@ -1829,13 +1931,22 @@ class Assistant(SpotifyTools, SkillTools, Agent):
         """List available skills (progressive disclosure) by name, category, and description."""
         cat = category.strip() or None
         skills = await asyncio.to_thread(self._skills_catalog.list_skills, cat)
+        request = self._request_scope.current_request
+        if request is not None and research_subject(request.text) and cat is None:
+            skills = [
+                skill
+                for skill in skills
+                if "web_research" in skill.routing.get("task_kinds", ())
+            ]
+            if not skills:
+                return "No matching research procedure. Use ordinary browser tools for the current subject; do not choose an unrelated skill."
         if not skills:
             return "No skills found in the skills library."
         lines = [f"- {s.name} ({s.category}): {s.description}" for s in skills]
         return (
             f"Skills catalog ({len(skills)} skills):\n"
             + "\n".join(lines)
-            + "\nUse skill_view(name) to read instructions and procedures."
+            + "\nUse skill_view for inspection and run_skill to plan a matching procedure."
         )
 
     @function_tool
@@ -1858,6 +1969,7 @@ class Assistant(SpotifyTools, SkillTools, Agent):
             f"# Skill: {view_result.get('name')} (v{view_result.get('version')})",
             f"Category: {view_result.get('category')}",
             f"Description: {view_result.get('description')}",
+            f"State: {view_result.get('state', 'inspectable')}; loading is not execution.",
         ]
         if view_result.get("linked_files"):
             info_lines.append(
@@ -1878,9 +1990,27 @@ class Assistant(SpotifyTools, SkillTools, Agent):
         file_path: str = "",
         category: str = "general",
     ) -> str:
-        """Manage and author skills (create, edit, patch, delete, write_file, remove_file)."""
+        """Manage skills (create, edit, patch, delete, write_file, remove_file, validate, enable, archive, restore). Explicit run-once does not permanently enable reuse."""
         act = action.lower().strip()
         sc = self._skills_catalog
+        if act in {"validate", "enable", "archive", "restore"}:
+            methods = {
+                "validate": sc.validate_skill,
+                "enable": sc.enable_skill,
+                "archive": sc.archive_skill,
+                "restore": sc.restore_skill,
+            }
+            options = (
+                {"available_tools": tuple(tool.info.name for tool in self.tools)}
+                if act in {"validate", "enable"}
+                else {}
+            )
+            try:
+                state = await asyncio.to_thread(methods[act], name, **options)
+            except (ValueError, OSError) as exc:
+                raise ToolError(str(exc)) from exc
+            self._skills_changed()
+            return f"Skill {act} applied: {state}."
         if act == "create":
             res = await asyncio.to_thread(
                 sc.create_skill, name, content, category=category
@@ -2416,6 +2546,8 @@ async def my_agent(ctx: JobContext):
             await assistant._skill_service.aclose()
             if assistant._skill_monitors:
                 await asyncio.gather(*assistant._skill_monitors.values())
+        if assistant is not None and assistant._procedure_cleanup_jobs:
+            await asyncio.gather(*tuple(assistant._procedure_cleanup_jobs))
         await asyncio.to_thread(task_store.close)
         await asyncio.to_thread(personal_store.close)
         if simulation_memory is not None:

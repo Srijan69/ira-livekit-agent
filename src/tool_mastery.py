@@ -186,7 +186,7 @@ class ToolTrainer:
 
         test_names = [
             ("Notepad", "Notepad"),
-            ("   Spotify   ", "Spotify"),
+            ("   Calculator   ", "Calculator"),
             ("calc\nwhoami", "calcwhoami"),
             ("Google Chrome\x00\x1b", "Google Chrome"),
         ]

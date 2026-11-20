@@ -25,9 +25,9 @@ from skills import (
 
 def test_parse_frontmatter_valid():
     text = """---
-name: spotify-player
-description: Plays tracks and playlists on Spotify
-category: media
+name: website-reader
+description: Opens websites and reads sources
+category: web
 version: 1.2.0
 platform: windows
 requires:
@@ -37,18 +37,18 @@ metadata:
   author: boss
 ---
 # Instructions
-Step 1: Open Spotify
-Step 2: Hit play
+Step 1: Open example.com
+Step 2: Read the page
 """
     meta, body = parse_frontmatter(text)
-    assert meta["name"] == "spotify-player"
-    assert meta["description"] == "Plays tracks and playlists on Spotify"
-    assert meta["category"] == "media"
+    assert meta["name"] == "website-reader"
+    assert meta["description"] == "Opens websites and reads sources"
+    assert meta["category"] == "web"
     assert meta["version"] == "1.2.0"
     assert meta["platform"] == "windows"
     assert "playwright" in meta["requires"]
     assert meta["metadata"]["author"] == "boss"
-    assert "Step 1: Open Spotify" in body
+    assert "Step 1: Open example.com" in body
 
 
 def test_parse_frontmatter_without_frontmatter():

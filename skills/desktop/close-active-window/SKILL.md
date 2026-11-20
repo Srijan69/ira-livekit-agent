@@ -8,6 +8,12 @@ metadata:
   hermes:
     category: desktop
     tags: [desktop, window, close, system]
+  ira:
+    task_kinds: ["close_window"]
+    allowed_tools: ["capture_screen", "press_desktop_key"]
+    allowed_effects: ["close", "observe"]
+    done_when: ["window_dismissed"]
+    inputs: {}
 ---
 
 # Close Active Window Skill

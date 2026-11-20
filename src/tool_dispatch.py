@@ -2,7 +2,7 @@
 
 Provides:
 - Robust JSON argument repair (markdown fences, trailing commas, single quotes, unquoted keys).
-- Parameter alias coercion (e.g. playlist_name -> name, song -> name).
+- Parameter alias coercion (e.g. application_name -> app_name).
 - Fail-soft diagnostic error formatting to prevent abrupt session termination.
 """
 
@@ -35,20 +35,6 @@ DEFAULT_ALIAS_MAP: dict[str, str] = {
     "app": "app_name",
     "application": "app_name",
     "application_name": "app_name",
-    # Spotify / Music
-    "playlist_name": "name",
-    "playlist_title": "name",
-    "playlist": "name",
-    "track_name": "name",
-    "song_name": "name",
-    "song_title": "name",
-    "song": "name",
-    "track": "name",
-    "artist_name": "artist",
-    "singer": "artist",
-    "command": "action",
-    "control": "action",
-    "cmd": "action",
     # Browser
     "link": "url",
     "target": "url",

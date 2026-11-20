@@ -1,4 +1,4 @@
-"""Browser controls and fresh playback evidence through native page boundaries."""
+"""Browser controls and fresh target evidence through native page boundaries."""
 
 import pytest
 
@@ -225,79 +225,6 @@ def test_browser_config_supports_brave_and_an_explicit_profile(monkeypatch, tmp_
 def test_browser_config_does_not_use_the_live_chrome_profile(monkeypatch):
     monkeypatch.setenv("LOCALAPPDATA", r"C:\Users\boss\AppData\Local")
     assert "Google\\Chrome\\User Data" not in browser_config("chrome")["user_data_dir"]
-
-
-def test_spotify_controls_use_the_current_player_audio():
-    page = FakePage()
-    button = FakeElement("button", **{"data-testid": "control-button-playpause"})
-    page.selector_map['[data-testid="control-button-playpause"]'] = [button]
-    page.script_results = [
-        {"available": True, "playing": False},
-        {"available": True, "playing": True},
-        {"available": True, "playing": True},
-        {"available": True, "playing": False},
-        {"position": 87.0, "target": 87.0},
-    ]
-    controller = _controller(page)
-    assert "Player state observed" in controller.spotify_control("play")
-    assert "Spotify paused" in controller.spotify_control("pause")
-    assert controller.spotify_control("rewind", 13) == "Spotify rewound 13 seconds."
-    assert button.actions == ["click", "click"]
-
-
-def test_spotify_playlist_search_selects_match_and_verifies_playback():
-    page = FakePage()
-    link = FakeElement(
-        "a", text="My Funk Songs", href="https://open.spotify.com/playlist/one"
-    )
-    link.on_click = lambda: setattr(
-        page, "url", "https://open.spotify.com/playlist/one"
-    )
-    page.selector_map['a[href*="/playlist/"]'] = [link]
-    button = FakeElement("button", **{"aria-label": "Play"})
-    page.selector_map["main button"] = [button]
-    page.evaluator = lambda script, arg: (
-        True if "const path" in script else {"available": True, "playing": True}
-    )
-    result = _controller(page).spotify_play_playlist("My Funk Songs")
-    assert page.visited == [
-        "https://open.spotify.com/search/My%20Funk%20Songs/playlists"
-    ]
-    assert "My Funk Songs" in result and "playing" in result.lower()
-    assert link.clicked and button.clicked
-
-
-def test_open_spotify_uses_the_selected_browser():
-    page = FakePage([FakeElement("button", text="Play")], title="Spotify")
-    assert "Spotify" in _controller(page).open_spotify("chrome")
-    assert page.visited == ["https://open.spotify.com"]
-
-
-def test_spotify_play_track_searches_and_verifies_playback():
-    page = FakePage()
-    page.script_results = [
-        {
-            "status": "selected",
-            "title": "Metamorphosis",
-            "artists": ["Interworld"],
-            "track_path": "/track/match",
-        },
-        {
-            "playing": True,
-            "title": "Metamorphosis",
-            "artists": ["Interworld"],
-            "track_path": "/track/match",
-        },
-    ]
-    result = _controller(page).spotify_play_track("Metamorphosis", "Interworld")
-    assert page.visited == [
-        "https://open.spotify.com/search/Metamorphosis%20Interworld/tracks"
-    ]
-    assert (
-        "Metamorphosis" in result
-        and "Interworld" in result
-        and "playing" in result.lower()
-    )
 
 
 @pytest.mark.parametrize("change", ["password", "name", "readonly", "disabled"])
