@@ -1,6 +1,7 @@
 # IRA routing and Spotify removal
 
-Implemented on 20 November 2026 following the user-approved gate review.
+Implemented following the user-approved gate review on 20 November 2026.
+The original project update and operating-memory migration completed on 21 November 2026.
 
 ## Result
 
@@ -40,9 +41,14 @@ support files after validation, stopped/replaced tasks, real exported research
 navigation/read/status/completion, post-closure history, and canonical UI run control.
 
 The pre-change targeted baseline passed 150 tests with one skip. The final stable
-Python suite passed **1,645 tests with 58 skips**. All source and test files passed
+Python suite passed **1,647 tests with 58 skips**. All source and test files passed
 Ruff, and the patch passed `git diff --check`. The final dashboard suite passed
 **402 tests across 31 files**; type checking and the production build passed.
+
+The original checkout also passed 109 focused runtime/routing checks and the three
+final observed-link checks. Its dashboard typecheck and production build passed.
+All 67 initial file updates and nine explicit removals were audited; the four-file
+follow-up preserves unrelated-link rejection and provides observed source labels.
 
 The deterministic admission helper was separately measured over 1,000 offline calls:
 median 0.0276 ms, p95 0.0351 ms. This is not voice or end-to-end latency. The installed
@@ -57,3 +63,9 @@ file hashes checked for concurrent edits. Existing personal facts, journal/audit
 evidence, browser profiles, credentials and unrelated working changes are preserved.
 Retired operating-memory recipes are migrated through locked/revision-checked APIs;
 raw private inputs are excluded from committed reports and procedural run evidence.
+
+Three retired operating-memory entries and the obsolete Spotify/browser routing
+clause were updated through locked/revision-checked APIs. Journal records were
+preserved, with private recoverable backups outside tracked files. No Git merge or
+push was performed. Restart IRA to load the updated backend toolset and dashboard;
+live voice/provider behavior was not re-evaluated during this implementation.

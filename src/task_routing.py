@@ -251,6 +251,26 @@ def _research_url(subject, value):
 
 
 def _observed_source(subject, target, observation, history):
+    words = re.findall(r"[a-z0-9]+", re.sub(r"['\u2019]s\b", "", subject.casefold()))
+    primary = (
+        words[0]
+        if words
+        and words[0]
+        not in {
+            "the",
+            "a",
+            "an",
+            "recent",
+            "latest",
+            "history",
+            "state",
+            "company",
+            "financial",
+            "news",
+            "information",
+        }
+        else ""
+    )
     for item in (observation or {}, *history):
         if not isinstance(item, dict) and not hasattr(item, "get"):
             continue
@@ -266,7 +286,19 @@ def _observed_source(subject, target, observation, history):
             candidate = (
                 link.get("url", link.get("href")) if isinstance(link, dict) else link
             )
-            if candidate == target:
+            if not _same_navigation(candidate, target):
+                continue
+            evidence = [candidate]
+            if isinstance(link, dict):
+                evidence.extend(link.get(key, "") for key in ("label", "title", "text"))
+            if any(
+                isinstance(value, str)
+                and (
+                    _subject_matches(subject, value)
+                    or (primary and _subject_matches(primary, value))
+                )
+                for value in evidence
+            ):
                 return True
     return False
 
@@ -344,11 +376,6 @@ def classify_action(
         if subject:
             if _url(subject) and _same_navigation(url, subject):
                 return "allow", "The human requested researching this exact URL."
-            if _observed_source(subject, url, observation, history):
-                return (
-                    "allow",
-                    "Navigation serves the requested research subject or an observed source.",
-                )
             parsed = _url(url)
             if parsed is None:
                 return "deny", "This destination cannot serve web research."
@@ -374,6 +401,11 @@ def classify_action(
             )
             if search and not _subject_matches(subject, search):
                 return "deny", "The search query does not concern the current subject."
+            if _observed_source(subject, url, observation, history):
+                return (
+                    "allow",
+                    "An observed source link names the requested subject or primary entity.",
+                )
         return None
     if name == "open_app":
         proposed = normalized_name(args.get("app_name", ""))

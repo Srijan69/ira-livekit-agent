@@ -662,7 +662,9 @@ class BrowserController:
                 continue
             targets.append({"index": index, "role": target.role, "label": target.label})
             if href:
-                links.append({"url": urljoin(self._page.url, href)})
+                links.append(
+                    {"url": urljoin(self._page.url, href), "label": target.label}
+                )
         return {"url": self._page.url, "links": links, "browser_targets": targets}
 
     def _assert_action_url(self, expected_url):

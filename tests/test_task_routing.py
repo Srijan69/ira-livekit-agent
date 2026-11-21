@@ -187,6 +187,11 @@ def test_source_navigation_requires_observed_relevant_link_not_broad_word_grant(
         "links": [args["url"]],
     }
     assert (
+        classify_action(request().text, "browse_to", args, observation=observation)
+        is None
+    )
+    observation["links"] = [{"url": args["url"], "label": "Microsoft company profile"}]
+    assert (
         classify_action(request().text, "browse_to", args, observation=observation)[0]
         == "allow"
     )
@@ -608,3 +613,42 @@ def test_bare_domain_normalization_does_not_expand_authority(text, url):
 
     result = classify_action(text, "browse_to", {"url": url})
     assert result is None or result[0] != "allow"
+
+
+def test_unrelated_observed_player_link_does_not_authorize_research_navigation():
+    from task_routing import classify_action
+
+    observation = {
+        "url": "https://www.bing.com/search?q=Microsoft",
+        "links": [{"url": "https://open.spotify.com"}],
+    }
+    result = classify_action(
+        "Do a deep search about Microsoft",
+        "browse_to",
+        {"url": "https://open.spotify.com"},
+        observation=observation,
+    )
+    assert result[0] == "deny"
+
+
+def test_observed_source_requires_target_relevance_not_just_search_membership():
+    from task_routing import classify_action
+
+    url = "https://news.example/story"
+    observation = {
+        "url": "https://www.bing.com/search?q=Microsoft",
+        "links": [{"url": url, "label": "Other company news"}],
+    }
+    assert (
+        classify_action(
+            "Research Microsoft", "browse_to", {"url": url}, observation=observation
+        )
+        is None
+    )
+    observation["links"][0]["label"] = "Microsoft company news"
+    assert (
+        classify_action(
+            "Research Microsoft", "browse_to", {"url": url}, observation=observation
+        )[0]
+        == "allow"
+    )
