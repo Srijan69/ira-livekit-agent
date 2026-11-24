@@ -31,9 +31,11 @@
 
 ```python
 def test_browser_reference_does_not_select_replacement(browser_fixture):
-    browser_fixture.set_content('<button>Save</button>')
+    browser_fixture.set_content("<button>Save</button>")
     browser_fixture.list_elements()
-    browser_fixture.evaluate('() => document.querySelector("button").outerHTML="<button>Delete</button>"')
+    browser_fixture.evaluate(
+        '() => document.querySelector("button").outerHTML="<button>Delete</button>"'
+    )
     with pytest.raises(Exception):
         browser_fixture.click(1)
 ```
@@ -52,8 +54,10 @@ def test_browser_reference_does_not_select_replacement(browser_fixture):
 def test_action_preview_omits_typed_content(observed_desktop):
     events = []
     frame = observed_desktop.observe()
-    observed_desktop.act(frame.id, 'type', text='Private text', _on_action=lambda f, a: events.append(a))
-    assert 'Private text' not in repr(events)
+    observed_desktop.act(
+        frame.id, "type", text="Private text", _on_action=lambda f, a: events.append(a)
+    )
+    assert "Private text" not in repr(events)
 ```
 
 ### Task 3: Dashboard computer preview
@@ -83,7 +87,7 @@ expect(parseComputerObservation({type:'computer.observation', screenshot_data_ur
 ```python
 async def test_disconnected_preview_is_not_replayed(fake_room):
     publisher = make_computer_publisher(fake_room)
-    publisher({'type':'computer.observation', 'phase':'observed'})
+    publisher({"type": "computer.observation", "phase": "observed"})
     fake_room.connected = True
     await asyncio.sleep(0)
     assert fake_room.sent == []
