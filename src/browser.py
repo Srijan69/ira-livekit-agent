@@ -1,36 +1,19 @@
-"""Codex-style browser control for IRA, built on Selenium.
-
-The model never sees a DOM. It sees a numbered list of the things on the page
-it can act on -- "1. link Sign in", "2. textbox Search" -- and acts by number.
-That is the shape the coding agents converge on, and it is the only shape that
-survives a voice channel: a CSS selector is not something anyone can say out
-loud, but "click three" is.
-
-Every Selenium call blocks, some of them for seconds. Nothing in this module may
-be called directly from the event loop -- `agent.py` wraps each one in
-`asyncio.to_thread`. A synchronous `driver.get()` on the loop stalls the audio
-stream carrying IRA's own voice, and she audibly stutters mid-sentence.
-
-The browser is launched lazily and reused. Starting Chrome costs a few seconds,
-so paying that on the first `browse_to` and never again is the difference
-between a usable tool and one the boss stops asking for.
-"""
+"""Native Playwright browser control with stable observed targets and thread ownership."""
 
 from __future__ import annotations
 
-import contextlib
 import json
 import logging
+import math
 import os
 import re
-import time
+import shutil
+import uuid
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
-from urllib.parse import quote, urlsplit, urlunsplit
+from typing import Any
+from urllib.parse import urljoin, urlsplit, urlunsplit
 
-if TYPE_CHECKING:  # pragma: no cover - import only for type checkers
-    from selenium.webdriver.remote.webdriver import WebDriver
-    from selenium.webdriver.remote.webelement import WebElement
+from browser_runtime import ACTION_TIMEOUT, BrowserWorker, browser_call
 
 logger = logging.getLogger("agent.browser")
 
@@ -49,11 +32,8 @@ MAX_ELEMENTS = 40
 # an aria-label.
 MAX_LABEL = 80
 
-# Selenium's own waits. Kept short deliberately: this is a voice loop, and a
-# 30-second default page-load timeout means half a minute of silence with no
-# way for IRA to explain herself.
+# Browser waits are bounded because this host also serves a live voice loop.
 PAGE_LOAD_TIMEOUT = 20
-IMPLICIT_WAIT = 0
 
 # Elements worth offering. Anything the user could plausibly click or type into.
 _INTERACTIVE_SELECTOR = (
@@ -156,8 +136,7 @@ def canonical_action_url(url: str) -> str:
 
 
 def validate_browser_text(text: str) -> None:
-    # Selenium interprets the private-use key range and control characters as
-    # keyboard actions. Text input must not smuggle a submit or modifier key.
+    # Keep text input separate from explicit keyboard actions.
     if (
         not isinstance(text, str)
         or len(text) > 4000
@@ -221,45 +200,9 @@ def browser_config(browser: str | None = None) -> dict[str, str]:
     }
 
 
-def _profile_options(options, config: dict[str, str]) -> None:
-    """Apply profile and browser binary settings to Chromium options."""
-    options.add_argument(f"--user-data-dir={config['user_data_dir']}")
-    options.add_argument(f"--profile-directory={config['profile_directory']}")
-    if config["browser"] == "brave":
-        candidates = [
-            os.path.join(
-                os.environ.get("PROGRAMFILES", ""),
-                "BraveSoftware",
-                "Brave-Browser",
-                "Application",
-                "brave.exe",
-            ),
-            os.path.join(
-                os.environ.get("LOCALAPPDATA", ""),
-                "BraveSoftware",
-                "Brave-Browser",
-                "Application",
-                "brave.exe",
-            ),
-        ]
-        for candidate in candidates:
-            if candidate and os.path.exists(candidate):
-                options.binary_location = candidate
-                break
-
-
-def _profile_lock_detected(config: dict[str, str]) -> bool:
-    """Return whether Chromium appears to have this user-data directory open."""
-    lock_names = ("SingletonLock", "SingletonCookie", "SingletonSocket")
-    return any(
-        os.path.exists(os.path.join(config["user_data_dir"], name))
-        for name in lock_names
-    )
-
-
 @dataclass(frozen=True)
 class PageElement:
-    """One numbered, actionable thing on the page."""
+    """One observed actionable control, numbered within the current page."""
 
     index: int
     role: str
@@ -269,625 +212,477 @@ class PageElement:
         return f"{self.index}. {self.role} {self.label}".rstrip()
 
 
-class BrowserUnavailableError(RuntimeError):
-    """Raised when Chrome cannot be started at all.
+@dataclass
+class _BrowserTarget:
+    element: Any
+    page: Any
+    role: str
+    label: str
 
-    Separate from ordinary failures because it is not retryable and the advice
-    to the boss is different: this host has no browser, rather than that page
-    did not load.
-    """
+
+class BrowserUnavailableError(RuntimeError):
+    """The selected browser or its persistent profile cannot be opened."""
 
 
 def _normalize(text: str) -> str:
-    """Collapse whitespace and cap length, for anything spoken aloud."""
-    collapsed = " ".join((text or "").split())
-    return collapsed[:MAX_LABEL]
+    return " ".join((text or "").split())[:MAX_LABEL]
 
 
-def _describe(element: WebElement) -> tuple[str, str]:
-    """Return a (role, label) pair for one element, as a person would say it.
+_ELEMENT_METADATA = """node => {
+    const tag = node.tagName.toLowerCase();
+    const type = (node.getAttribute('type') || 'text').toLowerCase();
+    const role = node.getAttribute('role') ||
+        (tag === 'input' ? (['submit','button','reset','image'].includes(type) ? 'button' :
+        ['checkbox','radio'].includes(type) ? type : 'textbox') :
+        ['textarea'].includes(tag) ? 'textbox' : tag === 'a' ? 'link' : tag);
+    const labels = node.labels ? [...node.labels].map(l => l.innerText || l.textContent).join(' ') : '';
+    const valueLabel = role === 'button' ? node.getAttribute('value') : '';
+    return {tag, type, role, readonly: node.hasAttribute('readonly'),
+        connected: node.isConnected,
+        label: (node.innerText || '').trim() || node.getAttribute('aria-label') ||
+        labels || node.getAttribute('placeholder') || valueLabel ||
+        node.getAttribute('title') || node.getAttribute('name') || node.getAttribute('alt') || ''};
+}"""
 
-    Labels are looked for in the order a sighted user would find them: the
-    visible text first, then the accessible name, then the placeholder, then
-    whatever is left. An element with no label at all still gets listed -- it
-    may be the only way forward on the page -- but is described by its role.
-    """
-    tag = (element.tag_name or "").lower()
-    input_type = (element.get_attribute("type") or "").lower()
 
-    if tag == "input" and input_type in _BUTTON_INPUT_TYPES:
-        role = "button"
-    elif tag == "input" and input_type in _TOGGLE_INPUT_TYPES:
-        role = input_type
-    elif tag in ("input", "textarea"):
-        role = "textbox"
-    elif tag == "a":
-        role = "link"
-    elif tag in ("button", "select"):
-        role = tag
+def _describe(element) -> tuple[str, str]:
+    metadata = (
+        element if isinstance(element, dict) else element.evaluate(_ELEMENT_METADATA)
+    )
+    return metadata.get("role", "element"), _normalize(metadata.get("label", ""))
+
+
+def _browser_executable(config):
+    selected = config["browser"]
+    override = os.environ.get(f"IRA_{selected.upper()}_EXECUTABLE", "").strip()
+    if override:
+        if not os.path.isfile(override):
+            raise BrowserUnavailableError(
+                f"The configured {selected.title()} executable was not found."
+            )
+        return override
+    if selected == "chrome":
+        return (
+            None  # Playwright's Chrome channel resolves the installed branded browser.
+        )
+    candidates = [
+        os.path.join(
+            os.environ.get(base, ""),
+            "BraveSoftware",
+            "Brave-Browser",
+            "Application",
+            "brave.exe",
+        )
+        for base in ("PROGRAMFILES", "PROGRAMFILES(X86)", "LOCALAPPDATA")
+    ]
+    candidates.extend(
+        filter(None, [shutil.which("brave"), shutil.which("brave-browser")])
+    )
+    for candidate in candidates:
+        if os.path.isfile(candidate):
+            return candidate
+    raise BrowserUnavailableError(
+        "Brave is not installed at a supported location. Install Brave or set IRA_BRAVE_EXECUTABLE; no other browser will be opened."
+    )
+
+
+def _launch_options(config, headless):
+    options = {
+        "headless": headless,
+        "timeout": PAGE_LOAD_TIMEOUT * 1000,
+        "args": [
+            f"--profile-directory={config['profile_directory']}",
+            "--no-first-run",
+            "--no-default-browser-check",
+            "--start-maximized",
+        ],
+        # Installed browsers need their component updater to register Widevine.
+        "ignore_default_args": ["--mute-audio", "--disable-component-update"],
+        "viewport": {"width": 1280, "height": 900} if headless else None,
+    }
+    executable = _browser_executable(config)
+    if executable:
+        options["executable_path"] = executable
     else:
-        role = (element.get_attribute("role") or tag or "element").lower()
+        options["channel"] = "chrome"
+    return options
 
-    for source in (
-        element.text,
-        element.get_attribute("aria-label"),
-        element.get_attribute("placeholder"),
-        element.get_attribute("value"),
-        element.get_attribute("title"),
-        element.get_attribute("name"),
-        element.get_attribute("alt"),
-    ):
-        label = _normalize(source or "")
-        if label:
-            return role, label
 
-    return role, ""
+def _profile_lock_detected(config):
+    return any(
+        os.path.exists(os.path.join(config["user_data_dir"], name))
+        for name in ("SingletonLock", "SingletonCookie", "SingletonSocket")
+    )
 
 
 class BrowserController:
-    """Owns one Chrome window and the numbering of what is on screen.
+    """Native Playwright pages and controls owned by one dedicated thread.
 
-    Not thread-safe, and deliberately so: every method runs inside a single
-    `asyncio.to_thread` hop from the agent, one tool call at a time. Two
-    concurrent calls would race on `_elements` anyway, since clicking
-    invalidates the numbering.
+    Public methods remain synchronous for the existing host-action boundary.
+    Playwright objects never leave the owner thread; request contextvars are
+    copied onto it before each operation.
     """
 
-    def __init__(
-        self, *, headless: bool | None = None, browser: str | None = None
-    ) -> None:
-        # Visible by default -- the point is that the boss can watch it work,
-        # the same way a coding agent's browser is visible. IRA_BROWSER_HEADLESS
-        # exists for CI, where there is no display to show it on.
+    def __init__(self, *, headless=None, browser=None, playwright_factory=None):
         if headless is None:
-            headless = os.environ.get("IRA_BROWSER_HEADLESS", "").lower() in (
+            headless = os.environ.get("IRA_BROWSER_HEADLESS", "").lower() in {
                 "1",
                 "true",
                 "yes",
-            )
-        self._headless = headless
-        self._browser = (browser or os.environ.get("IRA_BROWSER", "chrome")).lower()
-        self._driver: WebDriver | None = None
-        self._elements: list[WebElement] = []
+            }
+        self._headless = bool(headless)
+        self._browser = (
+            (browser or os.environ.get("IRA_BROWSER", "chrome")).strip().lower()
+        )
+        if self._browser not in {"chrome", "brave"}:
+            raise ValueError("IRA_BROWSER must be chrome or brave")
+        self._worker = BrowserWorker()
+        self._playwright_factory = playwright_factory
+        self._playwright = None
+        self._context = None
+        self._page = None
+        self._elements = []
+        self._tab_ids = {}
+        self.input_guard = None
 
-    # -- lifecycle ---------------------------------------------------------
+    def _check_action(self):
+        if self.input_guard is not None:
+            self.input_guard()
+
+    def _pages(self):
+        if self._context is None:
+            return []
+        try:
+            return [page for page in self._context.pages if not page.is_closed()]
+        except Exception:
+            return []
 
     @property
-    def is_open(self) -> bool:
-        return self._driver is not None and self._is_driver_alive()
-
-    def _is_driver_alive(self) -> bool:
-        """Check if the current driver has a valid, connected DevTools/remote session."""
-        if self._driver is None:
+    def is_open(self):
+        if self._context is None:
             return False
-        try:
-            from selenium.webdriver.remote.webdriver import WebDriver
+        return self._worker.run(lambda: bool(self._pages()))
 
-            if not isinstance(self._driver, WebDriver):
-                return True
-        except ImportError:
-            return True
+    @property
+    def current_url(self):
+        if self._context is None:
+            return ""
+        return self._worker.run(lambda: self._require_page().url)
 
-        try:
-            if not getattr(self._driver, "session_id", None):
-                return False
-            _ = self._driver.current_window_handle
-            return True
-        except Exception:
-            return False
+    def _register_page(self, page):
+        if page not in self._tab_ids:
+            self._tab_ids[page] = "tab-" + uuid.uuid4().hex[:16]
+            page.on("framenavigated", lambda _frame: self._clear_elements())
+        return page
 
-    def _ensure_driver(self) -> WebDriver:
-        """Start Chrome on first use and reuse it after.
+    def _clear_elements(self):
+        self._elements = []
 
-        The import is function-local for the same reason `pyautogui` is in
-        `agent.py`: this file is deployed to LiveKit Cloud, where there is no
-        display. A module-scope import of a browser stack that cannot run there
-        would take the whole agent down instead of just this one tool.
-        """
-        if self._driver is not None:
-            if not self._is_driver_alive():
-                logger.warning(
-                    "Browser driver session is invalid or closed; resetting driver"
-                )
-                with contextlib.suppress(Exception):
-                    self._driver.quit()
-                self._driver = None
-                self._elements = []
-            else:
-                return self._driver
+    @browser_call
+    def invalidate_elements(self):
+        self._clear_elements()
 
-        try:
-            from selenium import webdriver
-            from selenium.webdriver.chrome.options import Options
-        except ImportError as exc:  # pragma: no cover - selenium is a dependency
-            raise BrowserUnavailableError("Selenium is not installed") from exc
-
-        options = Options()
+    def _ensure_page(self):
+        self._check_action()
+        pages = self._pages()
+        if pages:
+            if self._page not in pages:
+                self._page = pages[-1]
+                self._clear_elements()
+            return self._page
+        if self._context is not None:
+            self._close_context()
         config = browser_config(self._browser)
-        _profile_options(options, config)
-        if self._headless:
-            options.add_argument("--headless=new")
-        # Chrome prints a banner about being controlled by automated software
-        # and a pile of first-run dialogs; both get in the way of a window the
-        # boss is meant to watch.
-        options.add_argument("--disable-infobars")
-        options.add_argument("--no-first-run")
-        options.add_argument("--no-default-browser-check")
-        options.add_argument("--start-maximized")
-        options.add_experimental_option("excludeSwitches", ["enable-automation"])
-
+        options = _launch_options(config, self._headless)
+        self._check_action()
         try:
-            # Selenium Manager resolves and downloads a matching chromedriver
-            # on its own, so there is no driver binary to install by hand.
-            driver = webdriver.Chrome(options=options)
+            if self._playwright_factory is None:
+                from playwright.sync_api import sync_playwright
+
+                self._playwright = sync_playwright().start()
+            else:
+                self._playwright = self._playwright_factory()
+            self._check_action()
+            self._context = self._playwright.chromium.launch_persistent_context(
+                config["user_data_dir"], **options
+            )
+            self._context.set_default_timeout(ACTION_TIMEOUT)
+            self._context.set_default_navigation_timeout(PAGE_LOAD_TIMEOUT * 1000)
+            pages = self._pages()
+            self._page = pages[0] if pages else self._context.new_page()
+            for page in self._pages():
+                self._register_page(page)
+            self._context.on("page", self._register_page)
+            logger.info(
+                "Playwright browser started",
+                extra={"browser": self._browser, "headless": self._headless},
+            )
+            return self._page
         except Exception as exc:
+            self._close_context()
+            self._check_action()
             if _profile_lock_detected(config):
                 raise BrowserUnavailableError(
-                    f"{config['browser'].title()} is already using the profile "
-                    f"'{config['profile_directory']}'. Close all {config['browser'].title()} "
-                    "windows using that profile, then try again. Chromium does not allow "
-                    "Selenium to start a second session with a locked profile."
+                    f"{self._browser.title()} is already using the configured profile. Close that IRA browser session before retrying."
                 ) from exc
-            raise BrowserUnavailableError(str(exc)) from exc
+            raise BrowserUnavailableError(
+                f"Could not start {self._browser.title()} with Playwright. Check the installed browser and IRA profile. No fallback browser was opened."
+            ) from exc
 
-        driver.set_page_load_timeout(PAGE_LOAD_TIMEOUT)
-        driver.implicitly_wait(IMPLICIT_WAIT)
-        self._driver = driver
-        logger.info("browser started", extra={"headless": self._headless})
-        return driver
+    def _require_page(self):
+        pages = self._pages()
+        if not pages:
+            raise BrowserUnavailableError("No page is open yet")
+        if self._page not in pages:
+            self._page = pages[-1]
+            self._clear_elements()
+        return self._page
 
-    def close(self) -> str:
-        """Close the window. Safe to call when nothing is open."""
-        if self._driver is None:
-            return "The browser was not open."
+    def _close_context(self):
+        opened = self._context is not None
+        context, runtime = self._context, self._playwright
+        self._context = self._playwright = self._page = None
+        self._elements = []
+        self._tab_ids = {}
         try:
-            self._driver.quit()
-        except Exception:
-            logger.exception("failed to quit the browser cleanly")
+            if context is not None:
+                context.close()
         finally:
-            self._driver = None
-            self._elements = []
-        return "Browser closed."
+            if runtime is not None:
+                runtime.stop()
+        return "Browser closed." if opened else "The browser was not open."
 
-    # -- navigation --------------------------------------------------------
+    def close(self):
+        if self._worker.is_owner:
+            return self._close_context()
+        try:
+            return self._worker.run(self._close_context)
+        finally:
+            self._worker.close()
 
-    def navigate(self, url: str) -> str:
-        """Open a URL, tolerating the way people say addresses out loud."""
+    @browser_call
+    def navigate(self, url):
         target = (url or "").strip()
         if not target:
             raise ValueError("No address was given.")
-        # Speech rarely includes a scheme -- "go to hacker news" arrives as a
-        # bare host. Assume https, which is also what a browser's address bar
-        # does now.
-        if "://" not in target:
-            target = f"https://{target}"
-
-        driver = self._ensure_driver()
+        if not urlsplit(target).scheme:
+            target = "https://" + target
+        page = self._ensure_page()
+        self._check_action()
         try:
-            driver.get(target)
-        except Exception as exc:
-            from selenium.common.exceptions import WebDriverException
-            from selenium.webdriver.remote.webdriver import WebDriver
-
-            if isinstance(driver, WebDriver) and isinstance(exc, WebDriverException):
-                logger.warning(
-                    "WebDriver navigation failed with %s; recreating driver and retrying",
-                    exc,
-                )
-                with contextlib.suppress(Exception):
-                    self._driver.quit()
-                self._driver = None
-                self._elements = []
-                try:
-                    driver = self._ensure_driver()
-                    driver.get(target)
-                except Exception as retry_exc:
-                    logger.warning(
-                        "Driver recreation failed (%s); falling back to system browser",
-                        retry_exc,
-                    )
-                    import webbrowser
-
-                    webbrowser.open(target)
-                    return f"Opened {target} in system browser."
-            else:
-                raise
-        self._elements = []
-        return self.describe_page()
-
-    def open_spotify(self, browser: str | None = None) -> str:
-        """Open Spotify Web Player using the selected signed-in browser profile."""
-        selected = (browser or self._browser).strip().lower()
-        if selected not in {"chrome", "brave"}:
-            raise ValueError("Browser must be chrome or brave")
-        if selected != self._browser and self._driver is not None:
-            self.close()
-        self._browser = selected
-        return self.navigate("https://open.spotify.com")
-
-    def back(self) -> str:
-        driver = self._require_driver()
-        driver.back()
-        self._elements = []
-        return self.describe_page()
-
-    def new_tab(self, url: str = "") -> str:
-        """Open a new browser tab and optionally navigate to a URL.
-
-        Uses Selenium 4 switch_to.new_window('tab') to create and switch to
-        a fresh tab. Resets the element cache and returns a confirmation
-        with the tab number and title.
-        """
-        driver = self._ensure_driver()
-        try:
-            driver.switch_to.new_window("tab")
-        except Exception as exc:
-            from selenium.common.exceptions import WebDriverException
-            from selenium.webdriver.remote.webdriver import WebDriver
-
-            if isinstance(driver, WebDriver) and isinstance(exc, WebDriverException):
-                logger.warning(
-                    "WebDriver new_tab failed with %s; recreating driver and retrying",
-                    exc,
-                )
-                with contextlib.suppress(Exception):
-                    self._driver.quit()
-                self._driver = None
-                self._elements = []
-                driver = self._ensure_driver()
-                driver.switch_to.new_window("tab")
-            else:
-                raise
-        self._elements = []
-
-        target = (url or "").strip()
-        if target:
-            if "://" not in target:
-                target = f"https://{target}"
-            try:
-                driver.get(target)
-            except Exception as exc:
-                from selenium.common.exceptions import WebDriverException
-
-                if isinstance(exc, WebDriverException):
-                    logger.warning("WebDriver new_tab get failed with %s", exc)
-            self._elements = []
-
-        handles = driver.window_handles
-        try:
-            curr = driver.current_window_handle
-            tab_idx = handles.index(curr) + 1
+            page.goto(target, wait_until="domcontentloaded")
         except Exception:
-            tab_idx = len(handles)
+            raise RuntimeError(
+                "Browser navigation did not finish successfully. Inspect the current page before continuing; no fallback browser was opened."
+            ) from None
+        finally:
+            self._clear_elements()
+        return self.describe_page()
 
-        title = _normalize(driver.title) or "New tab"
-        return f"Opened tab {tab_idx}: {title}."
+    @browser_call
+    def back(self):
+        page = self._require_page()
+        self._check_action()
+        try:
+            page.go_back(wait_until="domcontentloaded")
+        finally:
+            self._clear_elements()
+        return self.describe_page()
 
-    def switch_tab(self, tab: int | str) -> str:
-        """Switch to a specific open tab by 1-based index or window handle.
+    @browser_call
+    def new_tab(self, url=""):
+        self._ensure_page()
+        self._check_action()
+        page = self._context.new_page()
+        self._page = self._register_page(page)
+        self._clear_elements()
+        if url and url.strip():
+            self.navigate(url)
+        number = self._pages().index(page) + 1
+        return f"Opened tab {number}: {_normalize(page.title()) or 'New tab'}."
 
-        Validates bounds, switches window context, resets the element cache,
-        and returns a description of the active page.
-        """
-        driver = self._require_driver()
-        handles = driver.window_handles
-        if not handles:
-            raise RuntimeError("No browser tabs are currently open.")
-
-        target_handle: str | None = None
+    def _resolve_tab(self, tab, *, current=False):
+        pages = self._pages()
+        if not pages:
+            raise BrowserUnavailableError("No browser tabs are currently open.")
+        if tab is None and current:
+            return self._require_page()
         if isinstance(tab, int) and not isinstance(tab, bool):
-            if not (1 <= tab <= len(handles)):
+            if not 1 <= tab <= len(pages):
                 raise IndexError(
-                    f"Tab {tab} does not exist. There are {len(handles)} open tabs."
+                    f"Tab {tab} does not exist. There are {len(pages)} open tabs."
                 )
-            target_handle = handles[tab - 1]
-        elif isinstance(tab, str):
-            if tab in handles:
-                target_handle = tab
-            elif tab.strip().isdigit():
-                idx = int(tab.strip())
-                if not (1 <= idx <= len(handles)):
-                    raise IndexError(
-                        f"Tab {idx} does not exist. There are {len(handles)} open tabs."
-                    )
-                target_handle = handles[idx - 1]
-            else:
-                raise ValueError(
-                    f"Tab '{tab}' was not found. Open tabs: 1 to {len(handles)}."
-                )
-        else:
-            raise TypeError(
-                f"Tab identifier must be an integer or handle string, got {type(tab).__name__}."
+            return pages[tab - 1]
+        if isinstance(tab, str):
+            for page in pages:
+                if self._tab_ids.get(page) == tab:
+                    return page
+            if tab.strip().isdigit():
+                return self._resolve_tab(int(tab.strip()))
+            raise ValueError(
+                f"Tab '{tab}' was not found. Open tabs: 1 to {len(pages)}."
             )
+        raise TypeError("Tab identifier must be an integer or stable tab ID string.")
 
-        driver.switch_to.window(target_handle)
-        self._elements = []
+    @browser_call
+    def switch_tab(self, tab):
+        page = self._resolve_tab(tab)
+        self._check_action()
+        page.bring_to_front()
+        self._page = page
+        self._clear_elements()
         return self.describe_page()
 
-    def list_tabs(self) -> list[dict[str, Any]]:
-        """List all open browser tabs.
-
-        Returns a list of dicts with:
-            - 'index': 1-based tab index
-            - 'title': Page title of the tab
-            - 'url': Current URL of the tab
-            - 'is_active': True if this is the currently focused tab
-            - 'handle': Window handle string
-        """
-        if not self.is_open:
-            return []
-        driver = self._require_driver()
-        handles = driver.window_handles
-        if not handles:
-            return []
-
-        try:
-            current_handle = driver.current_window_handle
-        except Exception:
-            current_handle = handles[0]
-
-        tabs: list[dict[str, Any]] = []
-        for idx, handle in enumerate(handles, start=1):
-            is_active = handle == current_handle
-            if is_active:
-                tabs.append(
-                    {
-                        "index": idx,
-                        "title": _normalize(driver.title) or "Untitled page",
-                        "url": driver.current_url or "",
-                        "is_active": True,
-                        "handle": handle,
-                    }
-                )
-            else:
-                try:
-                    driver.switch_to.window(handle)
-                    title = _normalize(driver.title) or "Untitled page"
-                    url = driver.current_url or ""
-                except Exception:
-                    title = "Unknown"
-                    url = ""
-                tabs.append(
-                    {
-                        "index": idx,
-                        "title": title,
-                        "url": url,
-                        "is_active": False,
-                        "handle": handle,
-                    }
-                )
-
-        with contextlib.suppress(Exception):
-            driver.switch_to.window(current_handle)
-
-        return tabs
-
-    def close_tab(self, tab: int | str | None = None) -> str:
-        """Close a specific tab or the current active tab.
-
-        If other tabs remain, switches to the previous or adjacent tab,
-        resets the element cache, and describes the newly focused page.
-        If no tabs remain, closes the browser session cleanly.
-        """
-        if not self.is_open:
-            return "The browser was not open."
-        driver = self._require_driver()
-        handles = driver.window_handles
-        if not handles:
-            return self.close()
-
-        try:
-            current_handle = driver.current_window_handle
-        except Exception:
-            current_handle = handles[0]
-
-        if tab is None:
-            target_handle = current_handle
-        elif isinstance(tab, int) and not isinstance(tab, bool):
-            if not (1 <= tab <= len(handles)):
-                raise IndexError(
-                    f"Tab {tab} does not exist. There are {len(handles)} open tabs."
-                )
-            target_handle = handles[tab - 1]
-        elif isinstance(tab, str):
-            if tab in handles:
-                target_handle = tab
-            elif tab.strip().isdigit():
-                idx = int(tab.strip())
-                if not (1 <= idx <= len(handles)):
-                    raise IndexError(
-                        f"Tab {idx} does not exist. There are {len(handles)} open tabs."
-                    )
-                target_handle = handles[idx - 1]
-            else:
-                raise ValueError(
-                    f"Tab '{tab}' was not found. Open tabs: 1 to {len(handles)}."
-                )
-        else:
-            raise TypeError(
-                f"Tab identifier must be an integer or handle string, got {type(tab).__name__}."
+    @browser_call
+    def list_tabs(self):
+        pages = self._pages()
+        result = []
+        for index, page in enumerate(pages, 1):
+            self._register_page(page)
+            result.append(
+                {
+                    "index": index,
+                    "title": _normalize(page.title()) or "Untitled page",
+                    "url": page.url,
+                    "is_active": page == self._page,
+                    "handle": self._tab_ids[page],
+                }
             )
+        return result
 
-        target_idx = handles.index(target_handle) + 1
-        is_closing_active = target_handle == current_handle
+    @browser_call
+    def close_tab(self, tab=None):
+        if not self._pages():
+            return self._close_context()
+        page = self._resolve_tab(tab, current=True)
+        pages = self._pages()
+        index = pages.index(page)
+        active = page == self._page
+        self._check_action()
+        page.close()
+        self._tab_ids.pop(page, None)
+        remaining = self._pages()
+        if not remaining:
+            self._close_context()
+            return f"Closed tab {index + 1}. Browser closed as no tabs remain."
+        if active:
+            self._page = remaining[min(max(0, index - 1), len(remaining) - 1)]
+            self._page.bring_to_front()
+        self._clear_elements()
+        return f"Closed tab {index + 1}. {self.describe_page()}"
 
-        if len(handles) <= 1:
-            self.close()
-            return f"Closed tab {target_idx}. Browser closed as no tabs remain."
+    @browser_call
+    def evaluate(self, expression, arg=None):
+        """Run fixed internal inspection code on the browser owner thread."""
+        return self._require_page().evaluate(expression, arg)
 
-        if is_closing_active:
-            driver.close()
-            remaining = driver.window_handles
-            if not remaining:
-                self.close()
-                return f"Closed tab {target_idx}. Browser closed."
-            fallback_idx = max(0, target_idx - 2)
-            if fallback_idx >= len(remaining):
-                fallback_idx = len(remaining) - 1
-            new_handle = remaining[fallback_idx]
-            driver.switch_to.window(new_handle)
-            self._elements = []
-            new_idx = remaining.index(new_handle) + 1
-            title = _normalize(driver.title) or "Untitled page"
-            return f"Closed tab {target_idx}. Active tab is now {new_idx}: {title}."
-        else:
-            driver.switch_to.window(target_handle)
-            driver.close()
-            driver.switch_to.window(current_handle)
-            self._elements = []
-            return f"Closed tab {target_idx}."
+    @browser_call
+    def page_html(self):
+        return self._require_page().content()
 
-    def _require_driver(self) -> WebDriver:
-        if self._driver is None or not self._is_driver_alive():
-            try:
-                if self._driver is not None:
-                    self._driver.quit()
-            except Exception:
-                pass
-            self._driver = None
-            self._elements = []
-            raise BrowserUnavailableError("No page is open yet")
-        return self._driver
-
-    # -- reading -----------------------------------------------------------
-
-    def describe_page(self) -> str:
-        """One spoken line: where we are and how much there is to act on."""
-        driver = self._require_driver()
+    @browser_call
+    def describe_page(self):
+        page = self._require_page()
         count = len(self.list_elements())
-        title = _normalize(driver.title) or "Untitled page"
-        return f"{title}. {count} things to act on."
+        return (
+            f"{_normalize(page.title()) or 'Untitled page'}. {count} things to act on."
+        )
 
-    def read_page(self) -> str:
-        """Return the visible text of the page, capped.
-
-        `body.text` rather than `page_source`: the former is roughly what a
-        person sees, the latter is markup the model would have to parse and
-        which would blow the context budget on the first news article.
-        """
-        driver = self._require_driver()
+    @browser_call
+    def read_page(self):
         try:
-            body = driver.find_element("tag name", "body")
-            text = _normalize_block(body.text)
+            text = _normalize_block(self._require_page().locator("body").inner_text())
         except Exception:
-            logger.exception("failed to read page text")
             raise RuntimeError("Could not read that page.") from None
-
         if not text:
             return "That page has no readable text."
         if len(text) > MAX_PAGE_TEXT:
             return text[:MAX_PAGE_TEXT] + " ... (truncated)"
         return text
 
-    def observe(self, kind: str, value: str) -> bool:
-        """Read a postcondition from the current page without opening a browser.
-
-        page_element values are CSS selectors; only displayed matches count.
-        Unimplemented visual judgments never become successful checks.
-        """
-        driver = self._require_driver()
+    @browser_call
+    def observe(self, kind, value):
+        page = self._require_page()
         if kind == "page_contains":
-            return (
-                value.casefold()
-                in driver.find_element("tag name", "body").text.casefold()
-            )
+            return value.casefold() in page.locator("body").inner_text().casefold()
         if kind == "page_element":
+            validate_selector(value)
             return any(
-                element.is_displayed()
-                for element in driver.find_elements("css selector", value)
+                element.is_visible()
+                for element in page.locator(value).element_handles()
             )
         if kind == "page_value":
             selector, expected = parse_page_value(value)
             element = self._unique_selector(selector, enabled=False)
             self._validate_value_field(element, writable=False)
-            try:
-                return element.get_property("value") == expected
-            except Exception:
-                raise RuntimeError("Could not observe the field value.") from None
+            return element.input_value() == expected
         raise ValueError(f"Unsupported browser check: {kind}")
 
-    def playback_active(self) -> bool:
-        """Observe playing media; a requested button click is insufficient."""
-        return (
-            self._require_driver().execute_script(
-                "const a = document.querySelector('audio'); "
-                "if (a && !a.paused && !a.ended && a.currentTime > 0) return true; "
-                "const pp = document.querySelector('[data-testid=\"control-button-playpause\"]'); "
-                "if (pp && /pause/i.test(pp.getAttribute('aria-label') || '')) return true; "
-                "return false;"
-            )
-            is True
-        )
-
-    def playlist_context_matches(self) -> bool:
-        """Require the player to identify the playlist currently displayed."""
-        return (
-            self._require_driver().execute_script(
-                "const path = location.pathname; "
-                "if (!path.startsWith('/playlist/')) return false; "
-                "const context = document.querySelector('[data-testid=\"context-item-link\"]'); "
-                "if (context && new URL(context.href, location.href).pathname === path) return true; "
-                "const pp = document.querySelector('[data-testid=\"control-button-playpause\"]'); "
-                "return !!(pp && /pause/i.test(pp.getAttribute('aria-label') || ''));"
-            )
-            is True
-        )
-
-    def list_elements(self) -> list[PageElement]:
-        """Re-index everything actionable and return it numbered from 1.
-
-        Re-indexed on every call rather than cached, because any click or
-        navigation invalidates the previous numbering. Stale indices are the
-        single biggest failure mode of this style of tool -- clicking "3" and
-        getting whatever is third on a page that has since changed.
-        """
-        driver = self._require_driver()
-        from selenium.webdriver.common.by import By
-
-        found: list[WebElement] = []
-        described: list[PageElement] = []
-        for element in driver.find_elements(By.CSS_SELECTOR, _INTERACTIVE_SELECTOR):
+    @browser_call
+    def list_elements(self):
+        page = self._require_page()
+        described, found = [], []
+        for frame in page.frames:
+            if frame != page.main_frame:
+                try:
+                    if not frame.frame_element().is_visible():
+                        continue
+                except Exception:
+                    continue
+            for element in frame.locator(_INTERACTIVE_SELECTOR).element_handles():
+                if len(found) >= MAX_ELEMENTS:
+                    break
+                try:
+                    if not element.is_visible():
+                        continue
+                    role, label = _describe(element)
+                except Exception:
+                    continue
+                found.append(_BrowserTarget(element, page, role, label))
+                described.append(PageElement(len(found), role, label))
             if len(found) >= MAX_ELEMENTS:
                 break
-            try:
-                if not element.is_displayed():
-                    continue
-                role, label = _describe(element)
-            except Exception:
-                # Elements go stale mid-enumeration on any page with live
-                # scripting. Skipping one is fine; failing the whole listing
-                # over it is not.
-                continue
-            found.append(element)
-            described.append(PageElement(len(found), role, label))
-
         self._elements = found
         return described
 
-    # -- acting ------------------------------------------------------------
+    @browser_call
+    def scope_observation(self):
+        """Return read-only target evidence from the current observed page."""
+        if self._page is None:
+            return {}
+        links, targets = [], []
+        for index, target in enumerate(self._elements, 1):
+            if target.page is not self._page:
+                continue
+            try:
+                if not target.element.is_visible():
+                    continue
+                href = target.element.get_attribute("href")
+            except Exception:
+                continue
+            targets.append({"index": index, "role": target.role, "label": target.label})
+            if href:
+                links.append(
+                    {"url": urljoin(self._page.url, href), "label": target.label}
+                )
+        return {"url": self._page.url, "links": links, "browser_targets": targets}
 
-    def _assert_action_url(self, expected_url: str) -> None:
+    def _assert_action_url(self, expected_url):
         expected = canonical_action_url(expected_url)
         try:
-            current = canonical_action_url(self._require_driver().current_url)
+            current = canonical_action_url(self._require_page().url)
         except Exception:
             raise ValueError("Current browser URL cannot be verified.") from None
         if current != expected:
             raise ValueError("Current browser URL does not match the expected URL.")
 
-    def _unique_selector(self, selector: str, *, enabled: bool = True) -> WebElement:
+    def _unique_selector(self, selector, *, enabled=True):
         validate_selector(selector)
-        try:
-            elements = self._require_driver().find_elements("css selector", selector)
-            matches = [
-                element
-                for element in elements
-                if element.is_displayed() and (not enabled or element.is_enabled())
-            ]
-        except Exception:
-            raise RuntimeError(
-                "Browser target could not be resolved from the current page."
-            ) from None
+        matches = [
+            element
+            for element in self._require_page().locator(selector).element_handles()
+            if element.is_visible() and (not enabled or element.is_enabled())
+        ]
         if len(matches) != 1:
             raise ValueError(
                 "Browser selector must match exactly one visible, eligible target."
@@ -895,53 +690,242 @@ class BrowserController:
         return matches[0]
 
     @staticmethod
-    def _validate_value_field(element: WebElement, *, writable: bool) -> None:
-        try:
-            tag = (element.tag_name or "").lower()
-            field_type = (element.get_attribute("type") or "text").lower()
-            readonly = element.get_dom_attribute("readonly") is not None
-        except Exception:
-            raise RuntimeError("Could not verify the current input field.") from None
-
-        if tag == "select":
+    def _validate_value_field(element, *, writable):
+        metadata = element.evaluate(
+            "(node) => ({tag:node.tagName.toLowerCase(),type:(node.getAttribute('type')||'text').toLowerCase(),readonly:node.hasAttribute('readonly')})"
+        )
+        if metadata["tag"] == "select":
             if writable:
                 raise ValueError(
                     "Select dropdown elements cannot be typed into; use select_dropdown instead."
                 )
             return
-
-        if tag not in {"input", "textarea"} or (
-            tag == "input" and field_type not in _ALLOWED_INPUT_TYPES
+        if metadata["tag"] not in {"input", "textarea"} or (
+            metadata["tag"] == "input" and metadata["type"] not in _ALLOWED_INPUT_TYPES
         ):
             raise ValueError(
-                "Only ordinary text, date, and select fields can be read or typed into; "
-                "password, file, and hidden fields are not supported."
+                "Only ordinary text, date, and select fields can be read or typed into; password, file, and hidden fields are not supported."
             )
-
-        if writable and readonly:
+        if writable and metadata["readonly"]:
             raise ValueError("Cannot type into a read-only field.")
 
-    def click_selector(self, selector: str, expected_url: str) -> None:
-        """Act on one current, visible, enabled CSS target within an exact URL."""
+    def _resolve(self, index):
+        if type(index) is not int or not 1 <= index <= len(self._elements):
+            raise IndexError(
+                f"There is no current element reference {index}. Call list_page_elements first; the page has {len(self._elements)} observed controls."
+            )
+        target = self._elements[index - 1]
+        try:
+            valid = target.page == self._require_page() and target.element.evaluate(
+                "(node)=>node.isConnected"
+            )
+            role, label = _describe(target.element)
+            valid = valid and role == target.role and label == target.label
+        except Exception:
+            valid = False
+        if not valid:
+            self._clear_elements()
+            raise RuntimeError(
+                "The observed browser target changed or became stale. List the current controls before input."
+            )
+        return target
+
+    def _native_click(self, element, *, preflight=None):
+        observed = element.evaluate(_ELEMENT_METADATA)
+        identity = _describe(observed)
+        kind = [observed["tag"], observed["type"]]
+
+        def validate_target():
+            if preflight is not None:
+                preflight()
+            if (
+                not element.evaluate("(node)=>node.isConnected")
+                or _describe(element) != identity
+                or not element.is_visible()
+                or not element.is_enabled()
+            ):
+                raise RuntimeError("The browser control changed before input.")
+
+        self._check_action()
+        # Trial clicks can trigger hover layout; settle it before final preflight.
+        element.hover(timeout=ACTION_TIMEOUT)
+        self._check_action()
+        element.click(trial=True, timeout=ACTION_TIMEOUT)
+        self._check_action()
+        validate_target()
+        page = self._require_page()
+        frame = element.owner_frame()
+        ordinary_root = element.evaluate(
+            "(node)=>node.getRootNode()===node.ownerDocument"
+        )
+        if frame is None or type(ordinary_root) is not bool:
+            raise RuntimeError("The browser target's document cannot be verified.")
+        if frame != page.main_frame or not ordinary_root:
+            # Playwright retains its ancestor-frame and shadow-root hit guards.
+            self._check_action()
+            element.click(timeout=500)
+            return
+        first = element.bounding_box()
+        viewport = page.evaluate("() => ({width:innerWidth,height:innerHeight})")
+        second = element.bounding_box()
+        keys = ("x", "y", "width", "height")
+        if (
+            not isinstance(first, dict)
+            or not isinstance(second, dict)
+            or first != second
+            or any(
+                type(second.get(key)) not in {int, float}
+                or not math.isfinite(second[key])
+                for key in keys
+            )
+            or not isinstance(viewport, dict)
+            or any(
+                type(viewport.get(key)) not in {int, float}
+                or not math.isfinite(viewport[key])
+                or viewport[key] <= 0
+                for key in ("width", "height")
+            )
+            or second["width"] <= 0
+            or second["height"] <= 0
+            or second["x"] < 0
+            or second["y"] < 0
+            or second["x"] + second["width"] > viewport["width"]
+            or second["y"] + second["height"] > viewport["height"]
+        ):
+            raise RuntimeError("No stable browser click point can be verified.")
+        point = {
+            "x": second["x"] + second["width"] / 2,
+            "y": second["y"] + second["height"] / 2,
+        }
+        point_proof = (
+            "(node,[point,expected,identity,kind]) => {"
+            "const metadata = (" + _ELEMENT_METADATA + ")(node);"
+            "const label = (metadata.label||'').trim().replace(/\\s+/g,' ').slice(0,"
+            + str(MAX_LABEL)
+            + ");"
+            + """
+            const rect = node.getBoundingClientRect();
+            const hit = document.elementFromPoint(point.x,point.y);
+            return metadata.connected && metadata.role===identity[0] && label===identity[1] &&
+                metadata.tag===kind[0] && metadata.type===kind[1] &&
+                !node.matches(':disabled') && !node.closest('[aria-disabled="true"]') &&
+                node.getRootNode()===node.ownerDocument &&
+                rect.x===expected.x && rect.y===expected.y &&
+                rect.width===expected.width && rect.height===expected.height &&
+                (hit===node || (hit!==null && node.contains(hit)));
+        }"""
+        )
+        proof_args = [point, second, identity, kind]
+        if element.evaluate(point_proof, proof_args) is not True:
+            raise RuntimeError(
+                "The browser click point is covered or cannot be verified."
+            )
+        validate_target()
+        # Keep metadata, bounds and hit ownership in one final DOM read.
+        if element.evaluate(point_proof, proof_args) is not True:
+            raise RuntimeError("The browser click point changed before input.")
+        self._check_action()
+        # Native input has no second animation-frame wait after the final guard.
+        page.mouse.click(point["x"], point["y"])
+
+    @browser_call
+    def click(self, index):
+        target = self._resolve(index)
+        try:
+            self._native_click(target.element)
+        except Exception:
+            self._check_action()
+            raise RuntimeError(
+                "Browser click failed; the observed control may be covered or changed. Inspect the screen before retrying."
+            ) from None
+        finally:
+            self._clear_elements()
+        return f"Clicked the {target.role} {target.label}.".replace(" .", ".")
+
+    @browser_call
+    def click_selector(self, selector, expected_url):
         validate_selector(selector)
         self._assert_action_url(expected_url)
         element = self._unique_selector(selector)
         self._assert_action_url(expected_url)
+
+        def preflight():
+            self._assert_action_url(expected_url)
+            current = self._unique_selector(selector)
+            if not element.evaluate("(node,other)=>node===other", current):
+                raise RuntimeError("The browser selector target changed before input.")
+
         try:
-            element.click()
+            self._native_click(element, preflight=preflight)
         except Exception:
+            self._check_action()
             raise RuntimeError(
                 "Browser click failed; the target may have changed or be covered."
             ) from None
         finally:
-            self._elements = []
+            self._clear_elements()
 
-    def type_selector(
-        self, selector: str, text: str, expected_url: str, *, submit: bool = False
-    ) -> None:
-        """Type into a current safe field, verify its value, then optionally submit."""
-        from selenium.webdriver.common.keys import Keys
+    def _fill(self, element, text, *, preflight=None):
+        identity = _describe(element)
+        element.wait_for_element_state("editable", timeout=ACTION_TIMEOUT)
+        self._check_action()
+        self._validate_value_field(element, writable=True)
+        if (
+            not element.is_enabled()
+            or not element.evaluate("(node)=>node.isConnected")
+            or _describe(element) != identity
+        ):
+            raise RuntimeError("The input control changed while waiting for input.")
+        if preflight is not None:
+            preflight()
+        expected = element.evaluate(
+            """(node,value) => {
+            if (!['date','datetime-local','month','time'].includes(node.type)) return value;
+            const field = document.createElement('input');
+            field.type = node.type;
+            field.value = value;
+            return field.value;
+        }""",
+            text,
+        )
+        if text and not expected:
+            raise ValueError("The requested field value is malformed.")
+        self._check_action()
+        element.fill(expected, timeout=500)
+        self._check_action()
+        if (
+            not element.evaluate("(node)=>node.isConnected")
+            or _describe(element) != identity
+            or element.input_value() != expected
+        ):
+            raise RuntimeError("Input value could not be verified.")
 
+    @browser_call
+    def type_text(self, index, text, *, submit=False):
+        validate_browser_text(text)
+        if type(submit) is not bool:
+            raise ValueError("submit must be a boolean.")
+        target = self._resolve(index)
+        self._validate_value_field(target.element, writable=True)
+        try:
+            self._fill(target.element, text)
+            if submit:
+                self._check_action()
+                target.element.press("Enter", timeout=500)
+        except Exception:
+            self._check_action()
+            raise RuntimeError(
+                "Browser input could not be verified or submitted."
+            ) from None
+        finally:
+            self._clear_elements()
+        suffix = " and submitted" if submit else ""
+        return f"Typed into the {target.role} {target.label}{suffix}.".replace(
+            " .", "."
+        )
+
+    @browser_call
+    def type_selector(self, selector, text, expected_url, *, submit=False):
         validate_selector(selector)
         validate_browser_text(text)
         if type(submit) is not bool:
@@ -950,434 +934,89 @@ class BrowserController:
         element = self._unique_selector(selector)
         self._validate_value_field(element, writable=True)
         self._assert_action_url(expected_url)
-        try:
-            element.clear()
-            # Clearing can run page handlers; do not type if the page changed.
+
+        def preflight():
             self._assert_action_url(expected_url)
             current = self._unique_selector(selector)
-            if current != element:
+            if not element.evaluate("(node,other)=>node===other", current):
+                raise RuntimeError("Input target changed while waiting for input.")
+
+        try:
+            self._check_action()
+            element.fill("", timeout=ACTION_TIMEOUT)
+            self._check_action()
+            self._assert_action_url(expected_url)
+            current = self._unique_selector(selector)
+            if not element.evaluate("(node,other)=>node===other", current):
                 raise RuntimeError("Input target changed after clearing.")
             self._validate_value_field(current, writable=True)
-            self._assert_action_url(expected_url)
-            current.send_keys(text)
+            self._fill(current, text, preflight=preflight)
             self._assert_action_url(expected_url)
             current = self._unique_selector(selector)
-            if current != element:
+            if not element.evaluate("(node,other)=>node===other", current):
                 raise RuntimeError("Input target changed before verification.")
-            self._validate_value_field(current, writable=True)
-            if current.get_property("value") != text:
-                raise RuntimeError("Input value could not be verified.")
             if submit:
+                self._check_action()
                 self._assert_action_url(expected_url)
-                current.send_keys(Keys.RETURN)
+                current.press("Enter", timeout=500)
         except Exception:
-            # Driver exceptions may include user text or DOM attributes.
+            self._check_action()
             raise RuntimeError(
                 "Browser input could not be verified or submitted."
             ) from None
         finally:
-            self._elements = []
+            self._clear_elements()
 
-    def _resolve(self, index: int) -> WebElement:
-        if not self._elements:
-            self.list_elements()
-        if not 1 <= index <= len(self._elements):
-            raise IndexError(
-                f"There is no element {index}. The page has {len(self._elements)}."
+    @browser_call
+    def select_dropdown(self, index, value):
+        target = self._resolve(index)
+        element = target.element
+        metadata = element.evaluate(
+            "(node)=>({tag:node.tagName.toLowerCase(),disabled:node.disabled})"
+        )
+        if metadata["tag"] != "select":
+            raise ValueError(f"Element {index} is not a select dropdown.")
+        if metadata["disabled"] or not element.is_enabled():
+            raise ValueError("Cannot select an option from a disabled dropdown.")
+        options = element.evaluate(
+            """node=>[...node.options].map((o,index)=>({index,text:o.text.trim(),value:o.value.trim(),disabled:o.disabled||(o.parentElement.tagName==='OPTGROUP'&&o.parentElement.disabled)}))"""
+        )
+        query = str(value).strip()
+        matches = [o for o in options if o["value"] == query]
+        if not matches:
+            matches = [o for o in options if o["text"] == query]
+        if not matches:
+            matches = [
+                o
+                for o in options
+                if o["value"].casefold() == query.casefold()
+                or o["text"].casefold() == query.casefold()
+            ]
+        if not matches:
+            available = ", ".join(o["text"] or o["value"] for o in options[:8])
+            raise ValueError(
+                f"Option '{value}' not found. Available options: {available or 'none'}."
             )
-        return self._elements[index - 1]
-
-    def click(self, index: int) -> str:
-        element = self._resolve(index)
-        role, label = _describe(element)
+        if len(matches) != 1:
+            raise ValueError("That option is ambiguous; specify its unique value.")
+        selected = matches[0]
+        if selected["disabled"]:
+            raise ValueError("Cannot select a disabled option.")
         try:
-            element.click()
-        except Exception:
-            # Overlays, cookie banners and sticky headers routinely intercept
-            # a real click. The JS path ignores all of that, so it is worth one
-            # retry before reporting failure.
-            driver = self._require_driver()
-            driver.execute_script("arguments[0].click();", element)
-        self._elements = []
-        return f"Clicked the {role} {label}.".replace(" .", ".")
-
-    def type_text(self, index: int, text: str, *, submit: bool = False) -> str:
-        from selenium.webdriver.common.keys import Keys
-
-        element = self._resolve(index)
-        role, label = _describe(element)
-        tag = (element.tag_name or "").lower()
-        if tag == "select":
-            raise ValueError(
-                f"Element {index} is a select dropdown, not a text field. "
-                "Use select_dropdown to choose an option."
-            )
-        input_type = (element.get_attribute("type") or "").lower()
-        if input_type in {"date", "datetime-local", "month", "time"}:
-            with contextlib.suppress(Exception):
-                element.clear()
-            with contextlib.suppress(Exception):
-                element.send_keys(text)
-            with contextlib.suppress(Exception):
-                driver = self._require_driver()
-                driver.execute_script(
-                    "arguments[0].value = arguments[1]; "
-                    "arguments[0].dispatchEvent(new Event('input', {bubbles: true})); "
-                    "arguments[0].dispatchEvent(new Event('change', {bubbles: true}));",
-                    element,
-                    text,
-                )
-        else:
-            element.clear()
-            element.send_keys(text)
-
-        if submit:
-            element.send_keys(Keys.RETURN)
-            self._elements = []
-            return f"Typed into the {role} {label} and submitted.".replace(" .", ".")
-        return f"Typed into the {role} {label}.".replace(" .", ".")
-
-    def select_dropdown(self, index: int, value: str) -> str:
-        """Select an option in a dropdown element by visible text or value attribute.
-
-        Only use an index that came from listing the page.
-        """
-        from selenium.webdriver.support.ui import Select
-
-        element = self._resolve(index)
-        role, label = _describe(element)
-
-        tag = (element.tag_name or "").lower()
-        if tag != "select":
-            raise ValueError(
-                f"Element {index} ({role} {label}) is a {tag}, not a <select> dropdown."
-            )
-
-        is_disabled = False
-        with contextlib.suppress(Exception):
-            if hasattr(element, "get_dom_attribute"):
-                is_disabled = element.get_dom_attribute("disabled") is not None
-            elif hasattr(element, "get_attribute"):
-                is_disabled = element.get_attribute("disabled") is not None
-            if not is_disabled and hasattr(element, "is_enabled"):
-                is_disabled = not element.is_enabled()
-        if is_disabled:
-            raise ValueError(f"Cannot select option from disabled dropdown {label}.")
-
-        select: Select | None = None
-        options: list[WebElement] = []
-        try:
-            select = Select(element)
-            options = list(select.options)
-        except Exception as exc:
-            mock_opts = getattr(element, "options", None)
-            if mock_opts is None and hasattr(element, "find_elements"):
-                mock_opts = element.find_elements("tag name", "option")
-            if mock_opts is not None:
-                options = list(mock_opts)
-            else:
-                raise RuntimeError(
-                    f"Could not interact with dropdown {label}: {exc}"
-                ) from exc
-
-        val_str = str(value).strip()
-        target_opt: WebElement | None = None
-
-        # Tier 1: Exact match by visible text or value
-        for opt in options:
-            opt_text = (getattr(opt, "text", "") or "").strip()
-            opt_val = ""
-            if hasattr(opt, "get_attribute"):
-                opt_val = (opt.get_attribute("value") or "").strip()
-            if opt_text == val_str or opt_val == val_str:
-                target_opt = opt
-                break
-
-        # Tier 2: Case-insensitive match
-        if target_opt is None:
-            val_lower = val_str.lower()
-            for opt in options:
-                opt_text = (getattr(opt, "text", "") or "").strip().lower()
-                opt_val = ""
-                if hasattr(opt, "get_attribute"):
-                    opt_val = (opt.get_attribute("value") or "").strip().lower()
-                if opt_text == val_lower or opt_val == val_lower:
-                    target_opt = opt
-                    break
-
-        # Tier 3: Option not found
-        if target_opt is None:
-            available: list[str] = []
-            for opt in options:
-                t = (getattr(opt, "text", "") or "").strip()
-                v = ""
-                if hasattr(opt, "get_attribute"):
-                    v = (opt.get_attribute("value") or "").strip()
-                if t and v and t != v:
-                    available.append(f"'{t}' (value: '{v}')")
-                elif t:
-                    available.append(f"'{t}'")
-                elif v:
-                    available.append(f"'{v}'")
-
-            if available:
-                summary = ", ".join(available[:8])
-                if len(available) > 8:
-                    summary += f", and {len(available) - 8} more"
-                raise ValueError(
-                    f"Option '{value}' not found in dropdown {label or index}. Available options: {summary}."
-                )
-            raise ValueError(
-                f"Option '{value}' not found; dropdown {label or index} has no selectable options."
-            )
-
-        is_opt_disabled = False
-        with contextlib.suppress(Exception):
-            if hasattr(target_opt, "is_enabled") and callable(target_opt.is_enabled):
-                res = target_opt.is_enabled()
-                if isinstance(res, bool) and not res:
-                    is_opt_disabled = True
-        if not is_opt_disabled:
-            with contextlib.suppress(Exception):
-                raw = None
-                if hasattr(target_opt, "get_dom_attribute") and callable(
-                    target_opt.get_dom_attribute
-                ):
-                    raw = target_opt.get_dom_attribute("disabled")
-                elif hasattr(target_opt, "get_attribute") and callable(
-                    target_opt.get_attribute
-                ):
-                    raw = target_opt.get_attribute("disabled")
-                if (isinstance(raw, bool) and raw is True) or (
-                    isinstance(raw, str) and raw.lower() in {"disabled", "true"}
-                ):
-                    is_opt_disabled = True
-        if is_opt_disabled:
-            raise ValueError(
-                f"Cannot select disabled option '{value}' in dropdown {label or index}."
-            )
-
-        selected_text = (getattr(target_opt, "text", "") or "").strip()
-        selected_val = ""
-        if hasattr(target_opt, "get_attribute"):
-            selected_val = (target_opt.get_attribute("value") or "").strip()
-
-        if hasattr(element, "select_option"):
-            element.select_option(selected_val or selected_text or val_str)
-
-        if select is not None:
-            try:
-                if selected_val:
-                    select.select_by_value(selected_val)
-                else:
-                    select.select_by_visible_text(selected_text)
-            except Exception:
-                target_opt.click()
-        else:
-            target_opt.click()
-
-        with contextlib.suppress(Exception):
-            driver = self._require_driver()
-            driver.execute_script(
-                "arguments[0].dispatchEvent(new Event('change', {bubbles: true}));",
-                element,
-            )
-
-        self._elements = []
-        return f"Selected '{value}' in the {role} {label}.".replace(" .", ".")
-
-    def spotify_control(self, action: str, seconds: int = 10) -> str:
-        """Control Spotify Web Player audio in the active signed-in tab."""
-        driver = self._require_driver()
-        action = (action or "").strip().lower()
-        if action not in {"play", "pause", "rewind", "forward"}:
-            raise ValueError("Spotify action must be play, pause, rewind, or forward")
-        seconds = max(1, min(int(seconds), 600))
-        if action in {"play", "pause"}:
-            script = """
-                const audio = document.querySelector('audio');
-                const pp = document.querySelector('[data-testid="control-button-playpause"]');
-                const act = arguments[0];
-                if (pp) {
-                    const isPlaying = /pause/i.test(pp.getAttribute('aria-label') || '');
-                    if (act === 'pause' && isPlaying) { pp.click(); return 'paused'; }
-                    if (act === 'play' && !isPlaying) { pp.click(); return 'playing'; }
-                    if (act === 'play' || act === 'pause') { pp.click(); return act === 'play' ? 'playing' : 'paused'; }
-                }
-                if (audio) {
-                    if (act === 'play') { audio.play(); return 'playing'; }
-                    audio.pause(); return 'paused';
-                }
-                return 'no-audio';
-            """
-            result = driver.execute_script(script, action)
-            if result == "no-audio":
-                raise RuntimeError("Spotify has no audio player on this page")
-            return f"Spotify {action} requested."
-        delta = -seconds if action == "rewind" else seconds
-        result = driver.execute_script(
-            """const audio = document.querySelector('audio');
-               if (!audio) return 'no-audio';
-               audio.currentTime = Math.max(0, audio.currentTime + arguments[0]);
-               return audio.currentTime;""",
-            delta,
-        )
-        if result == "no-audio":
-            raise RuntimeError("Spotify has no audio player on this page")
-        verb = "rewound" if delta < 0 else "advanced"
-        return f"Spotify {verb} {seconds} seconds."
-
-    def spotify_play_playlist(self, name: str) -> str:
-        """Find a named Spotify playlist and verify that playback starts."""
-        target = " ".join((name or "").split())
-        if not target:
-            raise ValueError("Spotify playlist name cannot be empty")
-
-        driver = self._ensure_driver()
-        driver.get(
-            f"https://open.spotify.com/search/{quote(target, safe='')}/playlists"
-        )
-        deadline = time.time() + 6.0
-        matched = "not-found"
-        while time.time() < deadline:
-            matched = driver.execute_script(
-                """
-                const needle = arguments[0].toLowerCase();
-                const needleAlt = needle.startsWith('my ') ? needle.slice(3) : needle;
-                const altGenre = needle.includes('phonk')
-                    ? needle.replace('phonk', 'funk')
-                    : (needle.includes('funk') ? needle.replace('funk', 'phonk') : '');
-                const links = [...document.querySelectorAll('a[href*="/playlist/"]')];
-                const match = links.find((link) => {
-                  const text = (link.innerText || link.getAttribute('aria-label') || '').toLowerCase();
-                  return text.includes(needle) || (needleAlt && text.includes(needleAlt)) || (altGenre && text.includes(altGenre));
-                });
-                if (!match) return 'not-found';
-                match.click();
-                return 'matched';
-                """,
-                target,
-            )
-            if matched == "matched":
-                break
-            time.sleep(0.3)
-        if matched != "matched":
-            raise LookupError(f"Spotify playlist '{target}' was not found")
-
-        deadline = time.time() + 6.0
-        playback = "no-audio"
-        while time.time() < deadline:
-            playback = driver.execute_script(
-                """
-                const audio = document.querySelector('audio');
-                const play = [...document.querySelectorAll('main button')].find((button) =>
-                  /^play(?:\\s|$)/i.test((button.getAttribute('aria-label') ||
-                   button.innerText || '').trim())
-                );
-                if (play) { play.click(); return 'play-requested'; }
-                return audio ? 'paused' : 'no-audio';
-                """
-            )
-            if playback in {"playing", "play-requested"}:
-                break
-            time.sleep(0.3)
-        if playback not in {"playing", "play-requested"}:
-            raise RuntimeError(
-                f"Spotify found '{target}' but playback was not available ({playback})"
-            )
-        for _ in range(30):
-            if self.playback_active() and self.playlist_context_matches():
-                return f"Playing Spotify playlist {target}. Playback observed."
-            time.sleep(0.3)
-        raise RuntimeError(
-            f"Spotify selected '{target}', but playback could not be verified"
+            self._check_action()
+            element.select_option(index=selected["index"], timeout=ACTION_TIMEOUT)
+            self._check_action()
+            if (
+                not element.evaluate("(node)=>node.isConnected")
+                or element.evaluate("(node)=>node.selectedIndex") != selected["index"]
+            ):
+                raise RuntimeError("Selected option could not be verified.")
+        finally:
+            self._clear_elements()
+        return f"Selected '{value}' in the {target.role} {target.label}.".replace(
+            " .", "."
         )
 
-    def spotify_play_track(self, name: str, artist: str = "") -> str:
-        """Find a track on Spotify and play it."""
-        track_name = " ".join((name or "").split())
-        artist_name = " ".join((artist or "").split())
-        if not track_name:
-            raise ValueError("Spotify track name cannot be empty")
 
-        driver = self._ensure_driver()
-        current_url = getattr(driver, "current_url", "") or ""
-
-        # 1. If currently on a Spotify playlist page, check if the track is in the playlist rows
-        if "/playlist/" in current_url:
-            matched_playlist = driver.execute_script(
-                """
-                const trackNeedle = arguments[0].toLowerCase();
-                const artistNeedle = arguments[1].toLowerCase();
-                const rows = [...document.querySelectorAll('[data-testid="tracklist-row"]')];
-                for (const row of rows) {
-                    const text = (row.innerText || '').toLowerCase();
-                    if (text.includes(trackNeedle) && (!artistNeedle || text.includes(artistNeedle))) {
-                        const playBtn = row.querySelector('button[aria-label*="Play"], [data-testid="play-button"]');
-                        if (playBtn) { playBtn.click(); return true; }
-                        row.click();
-                        return true;
-                    }
-                }
-                return false;
-                """,
-                track_name,
-                artist_name,
-            )
-            if matched_playlist:
-                for _ in range(30):
-                    if self.playback_active():
-                        title = f"'{track_name}'" + (
-                            f" by {artist_name}" if artist_name else ""
-                        )
-                        return f"Playing {title} from the active playlist on Spotify. Playback observed."
-                    time.sleep(0.3)
-                title = f"'{track_name}'" + (
-                    f" by {artist_name}" if artist_name else ""
-                )
-                return f"Playing {title} from the active playlist on Spotify. Playback requested."
-
-        # 2. Search Spotify tracks directly
-        query = f"{track_name} {artist_name}".strip()
-        driver.get(f"https://open.spotify.com/search/{quote(query, safe='')}/tracks")
-        deadline = time.time() + 8.0
-        played = False
-        while time.time() < deadline:
-            res = driver.execute_script(
-                """
-                const rows = [...document.querySelectorAll('[data-testid="tracklist-row"]')];
-                if (!rows.length) return false;
-                const first = rows[0];
-                const playBtn = first.querySelector('button[aria-label*="Play"], [data-testid="play-button"]');
-                if (playBtn) { playBtn.click(); return true; }
-                first.click();
-                return true;
-                """
-            )
-            if res:
-                played = True
-                break
-            time.sleep(0.3)
-
-        if not played:
-            raise LookupError(
-                f"Spotify track '{query}' was not found in search results"
-            )
-
-        for _ in range(30):
-            if self.playback_active():
-                title = f"'{track_name}'" + (
-                    f" by {artist_name}" if artist_name else ""
-                )
-                return f"Playing {title} on Spotify. Playback observed."
-            time.sleep(0.3)
-
-        title = f"'{track_name}'" + (f" by {artist_name}" if artist_name else "")
-        return f"Playing {title} on Spotify. Playback requested."
-
-
-def _normalize_block(text: str) -> str:
-    """Collapse runs of blank lines but keep paragraph breaks."""
-    lines = [line.strip() for line in (text or "").splitlines()]
-    kept = [line for line in lines if line]
-    return "\n".join(kept)
+def _normalize_block(text):
+    return "\n".join(line.strip() for line in (text or "").splitlines()).strip()

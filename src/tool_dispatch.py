@@ -2,7 +2,7 @@
 
 Provides:
 - Robust JSON argument repair (markdown fences, trailing commas, single quotes, unquoted keys).
-- Parameter alias coercion (e.g. playlist_name -> name, song -> name).
+- Parameter alias coercion (e.g. application_name -> app_name).
 - Fail-soft diagnostic error formatting to prevent abrupt session termination.
 """
 
@@ -35,20 +35,6 @@ DEFAULT_ALIAS_MAP: dict[str, str] = {
     "app": "app_name",
     "application": "app_name",
     "application_name": "app_name",
-    # Spotify / Music
-    "playlist_name": "name",
-    "playlist_title": "name",
-    "playlist": "name",
-    "track_name": "name",
-    "song_name": "name",
-    "song_title": "name",
-    "song": "name",
-    "track": "name",
-    "artist_name": "artist",
-    "singer": "artist",
-    "command": "action",
-    "control": "action",
-    "cmd": "action",
     # Browser
     "link": "url",
     "target": "url",
@@ -101,9 +87,29 @@ def repair_json_string(text: str) -> str:
         text = re.sub(r"\s*```$", "", text)
         text = text.strip()
 
-    # Strip trailing commas before closing braces/brackets
-    text = re.sub(r",\s*([\]}])", r"\1", text)
-    return text
+    # Only repair punctuation outside strings. Regex replacement here used to
+    # silently change messages, lyrics and JSON nested in inputs_json.
+    repaired = []
+    quoted = False
+    escaped = False
+    for index, char in enumerate(text):
+        if quoted:
+            repaired.append(char)
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                quoted = False
+            continue
+        if char == '"':
+            quoted = True
+        if char == ",":
+            following = text[index + 1 :].lstrip()
+            if following.startswith(("]", "}")):
+                continue
+        repaired.append(char)
+    return "".join(repaired)
 
 
 def repair_tool_arguments(
@@ -367,7 +373,7 @@ def format_tool_error(
     from error_logger import log_tool_error
 
     advice = (
-        "Fallback: If browser interaction via Selenium failed or an element is obscured/unreachable, "
+        "Fallback: If Playwright interaction failed or an element is obscured/unreachable, "
         "call capture_screen immediately to view the screen and use click_desktop_element or click_mouse "
         "to complete the action on the visible desktop."
     )

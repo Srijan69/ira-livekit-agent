@@ -491,20 +491,18 @@ def test_live_scraper_unreachable_network_url_logs_diagnostic_and_raises(
     )
 
 
-def test_live_scraper_browser_page_source_fallback():
-    """Verify that when browser JS extraction fails, scraper falls back to page_source."""
-    mock_driver = MagicMock()
+def test_live_scraper_browser_html_fallback():
+    """Browser evaluation failure falls back to the marshalled HTML reader."""
+    mock_browser = MagicMock()
     # JS execution raises exception (e.g. script error or restricted context)
-    mock_driver.execute_script.side_effect = RuntimeError("JS execution disabled")
-    mock_driver.page_source = """
+    mock_browser.evaluate.side_effect = RuntimeError("JS execution disabled")
+    mock_browser.page_html.return_value = """
     <table>
         <tr><th>Name</th><th>Price</th><th>24h Change</th></tr>
         <tr><td>Fallback Coin</td><td>$42.00</td><td>+7.8%</td></tr>
     </table>
     """
 
-    mock_browser = MagicMock()
-    mock_browser._driver = mock_driver
     mock_browser.is_open = True
 
     assets = scrape_market_assets(browser=mock_browser)
@@ -515,7 +513,7 @@ def test_live_scraper_browser_page_source_fallback():
 
 
 def test_live_scraper_browser_read_page_text_fallback():
-    """Verify that when both JS and page_source are unavailable, scraper falls back to read_page."""
+    """When JS and page HTML are unavailable, fall back to bounded read_page text."""
     mock_browser = MagicMock(spec=["read_page", "is_open"])
     mock_browser.is_open = True
     mock_browser.read_page.return_value = (

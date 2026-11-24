@@ -3,6 +3,7 @@
 import asyncio
 import json
 import logging
+import re
 import time
 import uuid
 from contextlib import suppress
@@ -14,11 +15,13 @@ from livekit.agents import RunContext, ToolError, function_tool
 from livekit.agents.llm import ToolFlag, find_function_tools
 
 from host_execution import HostActionTimeout
+from request_scope import ScopeViolation
 from request_scope_livekit import check_current_action
 from skill_adapters import SkillToolAdapters
 from skill_execution import SkillExecutionService
 from skill_format import parse_skill
 from skill_runs import TERMINAL_STATUSES, SkillRunStore
+from task_routing import decide_task, normalized_name
 
 logger = logging.getLogger(__name__)
 
@@ -72,6 +75,7 @@ CAPABILITIES = {
         "scroll_mouse",
         "drag_mouse",
         "type_on_desktop",
+        "press_desktop_key",
     ),
     "skills": (
         "list_skills",
@@ -108,6 +112,125 @@ CAPABILITIES = {
 class SkillTools:
     _host_action_timeout_seconds = 30.0
     _host_shutdown_timeout_seconds = 1.0
+
+    def _procedure_run_for(self, request_id):
+        return getattr(self, "_procedure_runs", {}).get(request_id)
+
+    def _settle_replaced_procedure(self, record):
+        status = (
+            "uncertain"
+            if any(
+                step.get("outcome") == "uncertain" for step in record.get("steps", ())
+            )
+            else "cancelled"
+        )
+        return self._skills_catalog.state_store.finish_run(
+            record["run_id"],
+            record["request_id"],
+            status,
+            summary="Procedure plan changed; continue the same task with a current plan.",
+        )
+
+    def validate_active_procedure(self, request_id, name):
+        """Synchronous admission hook; changed packages require same-task replanning."""
+        self._request_scope.require(request_id)
+        run_id = self._procedure_run_for(request_id)
+        if not run_id or name == "run_skill":
+            return None
+        store = self._skills_catalog.state_store
+        record = store.run(run_id)
+        if record is None or record["status"] in TERMINAL_STATUSES:
+            return None
+        try:
+            info = self._skills_catalog.get_skill(
+                record["skill_slug"], include_archived=True
+            )
+            state = store.state(info) if info else {}
+            current = (
+                info is not None
+                and info.digest == record["document_digest"]
+                and not state["archived"]
+                and state["state"] in {"validated", "enabled"}
+            )
+        except (OSError, ValueError):
+            current = False
+        if current:
+            return record
+        self._settle_replaced_procedure(record)
+        self._skills_changed()
+        raise ScopeViolation(
+            "The selected procedure changed or was archived. Replan this same active task using current supported tools; no new human approval is required.",
+            status="procedure_replan_required",
+            retryable=True,
+        )
+
+    async def record_procedure_action(
+        self, request_id, name, outcome, evidence, *, action_id=""
+    ):
+        """Called by admitted tool settlement, never from a model success claim."""
+        active = self._request_scope.current_request
+        if active is None or active.id != request_id:
+            raise ToolError("Procedure evidence requires the current task identity.")
+        self._request_scope.require(request_id)
+        run_id = self._procedure_run_for(request_id)
+        if not run_id:
+            return None
+        store = self._skills_catalog.state_store
+        record = await asyncio.to_thread(
+            store.record_action,
+            run_id,
+            request_id,
+            {
+                "tool": name,
+                "outcome": outcome,
+                "evidence": evidence,
+                "action_id": action_id,
+            },
+        )
+        self._skills_changed()
+        return record
+
+    async def finish_procedure(
+        self, request_id, verified, summary, *, criteria=None, status=None
+    ):
+        """Settle adaptive work only with host-verified current-goal criteria."""
+        run_id = self._procedure_run_for(request_id)
+        if not run_id:
+            return None
+        store = self._skills_catalog.state_store
+        originating = store.run(run_id)
+        if originating is None or originating["status"] in TERMINAL_STATUSES:
+            return originating
+        try:
+            self._request_scope.require(request_id)
+        except ScopeViolation:
+            # Normal closure revokes action authority before its trusted outcome
+            # callback runs. Its receipt permits history settlement only.
+            if not self._request_scope.was_finished(request_id):
+                result = self._settle_replaced_procedure(originating)
+                self._skills_changed()
+                return result
+        else:
+            self.validate_active_procedure(request_id, "finish_procedure")
+        record = await asyncio.to_thread(
+            store.finish_run,
+            run_id,
+            request_id,
+            status or ("done" if verified else "error"),
+            criteria=criteria,
+            summary=summary,
+        )
+        self._skills_changed()
+        return record
+
+    async def cancel_procedures(self, request_id, *, status="cancelled"):
+        """Trusted stop/supersession callback closes history without claiming success."""
+        run_id = self._procedure_run_for(request_id)
+        if not run_id:
+            return None
+        return await asyncio.to_thread(
+            self._skills_catalog.state_store.finish_run, run_id, request_id, status
+        )
 
     def _initial_capability_tools(self):
         """Gemini tools are immutable mid-session; install schemas before connect.
@@ -314,7 +437,7 @@ class SkillTools:
     async def run_skill(
         self, context: RunContext, name: str, inputs_json: str = "{}"
     ) -> str:
-        """Run an enabled saved skill by name/slug. Inputs are a JSON object. If waiting, ask the returned question and use answer_skill with its IDs to continue."""
+        """Load a Hermes procedure and follow its returned instructions with actual tools; procedure_ready is not completion. Names may use procedure:category/name. Optional compiled workflows use workflow:slug; those execute verified steps and may return waiting for answer_skill."""
         run_id = None
         try:
             from tool_dispatch import repair_json_string
@@ -322,9 +445,115 @@ class SkillTools:
             inputs = json.loads(repair_json_string(inputs_json))
             if not isinstance(inputs, dict):
                 raise ValueError("Skill inputs must be a JSON object.")
-            skill = await asyncio.to_thread(self._skills.get, name)
+            procedure = (
+                None
+                if name.startswith("workflow:")
+                else await asyncio.to_thread(self._skills_catalog.get_skill, name)
+            )
+            workflow_name = name.removeprefix("workflow:")
+            skill = (
+                None
+                if name.startswith("procedure:")
+                else await asyncio.to_thread(self._skills.get, workflow_name)
+            )
+            if procedure is not None:
+                if skill is not None and not name.startswith("procedure:"):
+                    raise ValueError(
+                        "Ambiguous skill. Choose procedure:category/name or workflow:slug from list_skills."
+                    )
+                request = self._request_scope.current_request
+                if request is None:
+                    raise ValueError(
+                        "A finalized current human request is required to load a procedure for execution."
+                    )
+                explicit = bool(
+                    re.search(r"\b(?:run|use|follow|execute|try)\b", request.text, re.I)
+                ) and normalized_name(procedure.name) in normalized_name(request.text)
+                available = {tool.info.name for tool in self.tools}
+                decision = await asyncio.to_thread(
+                    decide_task,
+                    request,
+                    self._skills_catalog,
+                    self._skills,
+                    available_tools=available,
+                    selected=procedure.canonical_id,
+                    explicit=explicit,
+                    inputs=inputs,
+                )
+                if decision.mode != "procedure":
+                    raise ValueError(decision.reason)
+                if not decision.validate_current(
+                    self._request_scope.current_request, self._skills_catalog
+                ):
+                    raise ValueError(
+                        "The selected procedure or current request changed; reselect against fresh evidence."
+                    )
+                call = getattr(context, "function_call", None)
+                call_id = getattr(call, "call_id", None)
+                previous_id = self._procedure_run_for(request.id)
+                previous = (
+                    self._skills_catalog.state_store.run(previous_id)
+                    if previous_id
+                    else None
+                )
+                previous_decision = getattr(self, "_procedure_decisions", {}).get(
+                    request.id
+                )
+                unchanged = (
+                    previous is not None
+                    and previous_decision is not None
+                    and previous_decision == decision
+                )
+                if unchanged:
+                    run_id = previous_id
+                else:
+                    if previous and previous["status"] not in TERMINAL_STATUSES:
+                        self._settle_replaced_procedure(previous)
+                    run_id = (
+                        f"{self._reporter.run_id}:{call_id}"
+                        if call_id
+                        else uuid.uuid4().hex
+                    )
+                loaded = await asyncio.to_thread(
+                    self._skills_catalog.state_store.load_run,
+                    run_id,
+                    procedure,
+                    decision,
+                )
+                if not hasattr(self, "_procedure_runs"):
+                    self._procedure_runs = {}
+                    self._procedure_decisions = {}
+                self._procedure_runs[request.id] = run_id
+                self._procedure_decisions[request.id] = decision
+                self._last_skill_run_id = run_id
+                self._active_task_decision = decision
+                instructions = loaded["skill_markdown"]
+                self._skills_changed()
+                return json.dumps(
+                    {
+                        "status": "procedure_ready"
+                        if loaded["status"] == "loaded"
+                        else loaded["status"],
+                        "mode": "procedure",
+                        "name": procedure.name,
+                        "run_id": run_id,
+                        "request_id": request.id,
+                        "canonical_id": decision.selected_id,
+                        "document_digest": decision.document_digest,
+                        "input_names": [item.name for item in decision.inputs],
+                        "instructions": instructions,
+                        "next": "Execute the procedure with available tools under the current human request, observe results, and continue until the requested goal is verified. This call only loaded instructions; no action has run.",
+                    },
+                    ensure_ascii=False,
+                )
             if skill is None:
-                skill = await asyncio.to_thread(self._skills.find_by_phrase, name)
+                skill = (
+                    None
+                    if name.startswith("procedure:")
+                    else await asyncio.to_thread(
+                        self._skills.find_by_phrase, workflow_name
+                    )
+                )
             if skill is None:
                 raise ValueError(
                     "Skill not found. Use list_skills to inspect saved procedures."
@@ -336,6 +565,40 @@ class SkillTools:
                 if entry.skill and entry.skill.name == skill.name
             )
             service = await self._get_skill_runtime()
+            decision = None
+            request = self._request_scope.current_request
+            if request is not None:
+                explicit = bool(
+                    re.search(r"\b(?:run|use|follow|execute|try)\b", request.text, re.I)
+                ) and normalized_name(skill.name) in normalized_name(request.text)
+                decision = await asyncio.to_thread(
+                    decide_task,
+                    request,
+                    self._skills_catalog,
+                    self._skills,
+                    available_tools=self._skill_registry.names(),
+                    selected="workflow:" + slug,
+                    explicit=explicit,
+                    inputs=inputs,
+                )
+                if decision.mode != "workflow":
+                    raise ValueError(decision.reason)
+                if not decision.validate_current(
+                    self._request_scope.current_request,
+                    self._skills_catalog,
+                    self._skills,
+                ):
+                    raise ValueError(
+                        "The workflow identity or current request changed."
+                    )
+                inputs = dict(decision.input_values)
+                service.validate(
+                    skill, self._skill_registry, inputs, require_enabled=False
+                )
+                if explicit and skill.state != "enabled":
+                    # A current, explicit validated draft run uses the same
+                    # version and engine without permanently enabling reuse.
+                    skill = replace(skill, state="enabled")
             call = getattr(context, "function_call", None)
             call_id = getattr(call, "call_id", None)
             run_id = (
@@ -344,14 +607,17 @@ class SkillTools:
             self._last_skill_run_id = run_id
             if context is not None and hasattr(context, "update"):
                 await context.update(f"Starting {skill.name}.")
-            result = await service.run(
-                skill,
-                self._scoped_tools.registry_for_current_request(self._skill_registry),
-                self._reporter.for_tool(context),
-                inputs=inputs,
-                run_id=run_id,
-                skill_slug=slug,
-            )
+            with service.run_store.bind_task(decision):
+                result = await service.run(
+                    skill,
+                    self._scoped_tools.registry_for_current_request(
+                        self._skill_registry
+                    ),
+                    self._reporter.for_tool(context),
+                    inputs=inputs,
+                    run_id=run_id,
+                    skill_slug=slug,
+                )
             return await self._skill_response(service, result)
         except asyncio.CancelledError:
             if self._skill_service and run_id:
@@ -396,6 +662,20 @@ class SkillTools:
     async def stop_skill(self, context: RunContext, run_id: str = "") -> str:
         """Stop the current skill or a specified run before further steps execute."""
         target = run_id or self._last_skill_run_id
+        procedure = (
+            await asyncio.to_thread(self._skills_catalog.state_store.run, target)
+            if target
+            else None
+        )
+        if procedure:
+            await asyncio.to_thread(
+                self._skills_catalog.state_store.finish_run,
+                target,
+                procedure["request_id"],
+                "cancelled",
+            )
+            self._skills_changed()
+            return "Procedure stopped; its goal was not verified."
         if not target or self._skill_service is None:
             return "No skill is running."
         if not self._skill_service.stop(target):
@@ -408,6 +688,27 @@ class SkillTools:
         target = run_id or self._last_skill_run_id
         if not target:
             return "No skill run in this session."
+        procedure = await asyncio.to_thread(
+            self._skills_catalog.state_store.run, target
+        )
+        if procedure:
+            return _skill_json(
+                {
+                    key: procedure.get(key)
+                    for key in (
+                        "run_id",
+                        "mode",
+                        "status",
+                        "request_id",
+                        "current_goal",
+                        "selection_reason",
+                        "completed_steps",
+                        "total_steps",
+                        "verified",
+                        "message",
+                    )
+                }
+            )
         service = await self._get_skill_runtime()
         record = await asyncio.to_thread(service.status, target)
         if not record:
@@ -439,18 +740,25 @@ class SkillTools:
 
     @function_tool
     async def list_skills(self, context: RunContext) -> str:
-        """List saved skills and whether they are drafts or enabled."""
+        """List Hermes procedures (follow with tools) and optional compiled workflows (draft/enabled)."""
         rows = await asyncio.to_thread(self._skills.catalog)
-        return (
-            "\n".join(f"{r['slug']} [{r['state']}]: {r['description']}" for r in rows)[
-                :MODEL_OUTPUT_LIMIT
-            ]
-            or "No skills saved."
+        procedures = await self.skills_list(context)
+        workflows = "\n".join(
+            f"workflow:{r['slug']} [compiled, {r['state']}]: {r['description']}"
+            for r in rows
+        )
+        return procedures + (
+            "\nOptional compiled workflows:\n" + workflows if workflows else ""
         )
 
     @function_tool
     async def view_skill(self, context: RunContext, name: str) -> str:
-        """View the full Markdown specification of a saved skill by name or slug."""
+        """Read a Hermes procedure by name (alias of skill_view) or a workflow:slug specification."""
+        if not name.startswith("workflow:"):
+            return await self.skill_view(context, name)
+        return await self._view_compiled_skill(name.removeprefix("workflow:"))
+
+    async def _view_compiled_skill(self, name: str) -> str:
         skill = await asyncio.to_thread(self._skills.get, name)
         if skill is None:
             skill = await asyncio.to_thread(self._skills.find_by_phrase, name)
@@ -458,7 +766,7 @@ class SkillTools:
             return f"Skill '{name}' not found. Use list_skills to inspect available procedures."
         from skill_format import render_skill
 
-        return render_skill(skill)[:MODEL_OUTPUT_LIMIT]
+        return "Mode: compiled workflow\n" + render_skill(skill)
 
     async def save_skill(self, context: RunContext, markdown: str) -> str:
         """Save a user-provided procedure as a draft Markdown skill; saving never enables execution."""
@@ -473,7 +781,31 @@ class SkillTools:
     async def enable_skill(self, context: RunContext, name: str) -> str:
         """Enable a reviewed skill when the user explicitly asks. Validates permissions and checks without executing."""
         try:
-            skill = await asyncio.to_thread(self._skills.get, name)
+            procedure = (
+                None
+                if name.startswith("workflow:")
+                else await asyncio.to_thread(self._skills_catalog.get_skill, name)
+            )
+            if procedure is not None:
+                if (
+                    not name.startswith("procedure:")
+                    and await asyncio.to_thread(self._skills.get, name) is not None
+                ):
+                    raise ValueError(
+                        "Ambiguous skill name; choose the procedure or workflow from list_skills."
+                    )
+                await asyncio.to_thread(
+                    self._skills_catalog.enable_skill,
+                    procedure.canonical_id,
+                    available_tools={tool.info.name for tool in self.tools},
+                )
+                self._skills_changed()
+                return f"Enabled {procedure.name} for automatic selection when it fits the current task."
+            if name.startswith("procedure:"):
+                raise ValueError("Procedure not found.")
+            skill = await asyncio.to_thread(
+                self._skills.get, name.removeprefix("workflow:")
+            )
             if skill is None:
                 raise ValueError("Skill not found.")
             service = await self._get_skill_runtime()
@@ -499,7 +831,21 @@ class SkillTools:
 
     async def delete_skill(self, context: RunContext, name: str) -> str:
         """Archive a skill when requested; its versions remain recoverable."""
-        changed = await asyncio.to_thread(self._skills.delete, name)
+        procedure = (
+            None
+            if name.startswith("workflow:")
+            else await asyncio.to_thread(self._skills_catalog.get_skill, name)
+        )
+        if procedure is not None:
+            changed = await asyncio.to_thread(
+                self._skills_catalog.archive_skill, procedure.canonical_id
+            )
+        elif name.startswith("procedure:"):
+            changed = False
+        else:
+            changed = await asyncio.to_thread(
+                self._skills.delete, name.removeprefix("workflow:")
+            )
         self._skills_changed()
         return "Skill archived." if changed else "Skill not found."
 
@@ -511,12 +857,19 @@ class SkillTools:
 
         try:
             service = await self._get_skill_runtime()
+            selected_run = run_id or self._last_skill_run_id
+            adaptive = await asyncio.to_thread(
+                self._skills_catalog.state_store.run, selected_run
+            )
             result = await asyncio.to_thread(
                 learn_from_run,
-                run_id or self._last_skill_run_id,
+                selected_run,
                 name,
                 self._skills,
-                service.run_store,
+                self._skills_catalog.state_store.run_store
+                if adaptive
+                else service.run_store,
+                catalog=self._skills_catalog,
             )
         except (ValueError, OSError) as exc:
             raise ToolError(str(exc)) from exc

@@ -8,6 +8,12 @@ metadata:
   hermes:
     category: web
     tags: [web, browser, navigate, url]
+  ira:
+    task_kinds: ["navigate"]
+    allowed_tools: ["browse_to", "read_page", "list_page_elements"]
+    allowed_effects: ["navigate", "read"]
+    done_when: ["page_read"]
+    inputs: {"url": {"required": true, "type": "string"}}
 ---
 
 # Open Web Page Skill

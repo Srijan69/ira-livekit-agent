@@ -11,7 +11,7 @@ _SECRET = re.compile(
 )
 
 
-def learn_from_run(run_id, name, store, run_store):
+def learn_from_run(run_id, name, store, run_store, *, catalog=None):
     record = run_store.get(run_id) if run_id else None
     if (
         not record
@@ -21,6 +21,49 @@ def learn_from_run(run_id, name, store, run_store):
         raise ValueError("Learning requires a verified successful run.")
     if not name.strip() or len(name) > 100:
         raise ValueError("Use a skill name of 1 to 100 characters.")
+    if record.get("mode") == "procedure":
+        if (
+            not record.get("request_id")
+            or record.get("decision", {}).get("request_id") != record["request_id"]
+            or not record.get("steps")
+            or not record.get("document_digest")
+        ):
+            raise ValueError(
+                "Learning requires verified evidence for the original task."
+            )
+        if catalog is None:
+            raise ValueError("An adaptive procedure catalog is required.")
+        if catalog.get_skill(name) is not None:
+            raise ValueError(
+                "That skill already exists. Choose a new name or explicitly edit it."
+            )
+        import yaml
+
+        from skills import parse_frontmatter
+
+        markdown = record.get("skill_markdown", "")
+        if _SECRET.search(markdown):
+            raise ValueError(
+                "The procedure contains credentials; use parameterized inputs."
+            )
+        metadata, body = parse_frontmatter(markdown)
+        metadata.update(name=name.strip(), version="1.0.0")
+        metadata.setdefault("metadata", {}).setdefault("ira", {})["source_run_id"] = (
+            run_id
+        )
+        category = (
+            metadata.get("metadata", {}).get("hermes", {}).get("category", "learned")
+        )
+        text = (
+            "---\n"
+            + yaml.safe_dump(metadata, sort_keys=False, allow_unicode=True)
+            + "---\n\n"
+            + body
+        )
+        created = catalog.create_skill(name, text, category=category)
+        if not created["success"]:
+            raise ValueError(created["error"])
+        return catalog.get_skill(name)
     if store.get(name) is not None or store.versions(skill_slug(name)):
         raise ValueError(
             "That skill already exists. Choose a new name or explicitly edit it."

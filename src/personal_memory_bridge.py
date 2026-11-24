@@ -7,7 +7,7 @@ import sqlite3
 
 from aiohttp import web
 
-from personal_memory import MemoryConflict, PersonalMemoryStore
+from personal_memory import PROFILE_FIELDS, MemoryConflict, PersonalMemoryStore
 
 PERSONAL_MEMORY = web.AppKey("personal_memory", PersonalMemoryStore)
 
@@ -63,7 +63,7 @@ def register_personal_memory_routes(app, authorize, *, store=None):
             if set(body) - {"expected_revision"}:
                 raise ValueError("reset accepts only expected_revision")
             return app[PERSONAL_MEMORY].save_profile(
-                {"name": "", "age": None, "occupation": "", "preferences": ""},
+                {**dict.fromkeys(PROFILE_FIELDS, ""), "age": None},
                 expected_revision=body.get("expected_revision"),
             )
 

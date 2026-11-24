@@ -15,8 +15,9 @@ This project includes:
   - Turn-taking is handled by Gemini's own voice activity detection, so no LiveKit turn detector is used
   - Requires `GOOGLE_API_KEY` in `.env.local`
   - Other [realtime models](https://docs.livekit.io/agents/models/realtime) are available through the plugin ecosystem
-- **An `open_app` tool** that launches desktop apps on voice command ("open Spotify") by typing into the Windows Start menu with PyAutoGUI — see [Desktop control](#desktop-control) for its limits
-- **Codex-style web browsing** over Selenium — IRA drives a real Chrome window you can watch, enumerates what's on the page as a numbered list, and acts by number ("click three"). See [Web browsing](#web-browsing)
+- **An `open_app` tool** that launches desktop apps on voice command ("open Notepad") by typing into the Windows Start menu with PyAutoGUI — see [Desktop control](#desktop-control) for its limits
+- **Playwright web browsing** — IRA drives visible Chrome or Brave, lists page controls, and verifies requested actions. See [Web browsing](#web-browsing)
+- **Observed computer use** — fresh screen images, named desktop controls, Unicode typing, dashboard before/after previews and a subtle native target indicator. See [Desktop control](#desktop-control)
 - **Durable memory** in a local SQLite database with full-text search, so facts about you survive a restart. `remember`, `recall`, and `forget` are voice-callable. See [Memory](#memory)
 - **A Windows desktop dashboard** with voice and typed commands, saved tasks, current weather with a city selector, and system readings. See [Desktop dashboard](#desktop-dashboard)
 - **Latency tuning** for the realtime loop: configured end-of-turn detection, context window compression, and a process prewarm — see [Latency](#latency)
@@ -125,8 +126,9 @@ run the shortcut script again.
   then help through IRA. File attachments remain disabled. The name/tier in
   `dashboard/src/lib/profile.ts` are local display defaults, not account data.
 
-Only Home is implemented. The other sidebar pages show “Not built yet”. Tray,
-hotkey, autostart and installer work remain sub-project D in the
+Home, Skills, Settings and System Controls are available. Your Profile and
+Memory and Context are under System Controls; connection/provider settings stay
+under Settings. Tray, hotkey, autostart and installer work are tracked in the
 [handoff](docs/handoff/HANDOFF.md).
 
 Dashboard checks: `npm test`, `npm run typecheck`, and `npm run build` from
@@ -135,6 +137,27 @@ Dashboard checks: `npm test`, `npm run typecheck`, and `npm run build` from
 data and a scripted session, not live provider or personal data.
 
 ## Desktop control
+
+IRA observes all monitors before desktop input. She uses the newest image's
+observation ID and pixel coordinates, preferably an accessibility target ID.
+`inspect_screen` zooms details and `focus_desktop_window` selects an observed
+window. Input rechecks foreground, target identity and request authority; each
+action returns a fresh image. Unicode text uses Windows SendInput with focus
+checks between characters. `press_desktop_key` provides supported editing and
+navigation keys separately from text.
+
+Home's computer-use preview shows the actual before/after image, named targets,
+pointer or drag path, timestamps and a bounded action history. Expand it for a
+larger view. Screens travel through authenticated LiveKit text streams; the
+preview clears on stop or disconnect and marks old frames as stale. The native
+Windows action indicator draws a subtle target ring/path while IRA acts. It is
+click-through, does not activate a window, and closes after input or failure.
+
+When page automation fails, IRA receives a fresh desktop recovery image and
+can inspect/focus the requested browser, handle its native obstruction, then
+list page controls again. A stop or uncertain host timeout revokes further
+input instead of starting recovery. Actual visible results still determine
+whether the goal is complete.
 
 The `open_app` tool presses <kbd>Win</kbd>, types the app name into the Start
 menu, and presses <kbd>Enter</kbd>. Worth knowing:
@@ -156,9 +179,8 @@ menu, and presses <kbd>Enter</kbd>. Worth knowing:
 
 ## Web browsing
 
-IRA drives a real Chrome window through Selenium, in the same shape a coding
-agent does: she never sees a DOM, she sees a numbered list of the things on the
-page she can act on, and she acts by number.
+IRA drives Chrome or Brave through native Playwright APIs. Page tools expose
+bounded text and numbered controls for the model to act on.
 
 ```
 1. link Sign in
@@ -179,31 +201,37 @@ Worth knowing:
 - **Chrome starts on the first `browse_to` and is then reused.** Starting it
   costs a few seconds; paying that once is the difference between a usable tool
   and one you stop asking for.
-- **No chromedriver to install.** Selenium 4.6+ ships Selenium Manager, which
-  resolves and downloads a matching driver on its own.
+- **No separate browser driver.** `uv sync` installs Playwright. IRA uses your
+  installed Chrome channel or an explicit Brave executable and keeps its
+  existing persistent profiles. Missing browsers are reported without substitution.
+  Browser component updates stay enabled so installed browser components can initialize.
 - **The numbering is re-derived on every listing and thrown away after every
   click or navigation.** Stale indices are the main failure mode of this style
   of tool — saying "click three" and getting whatever is third on a page that
   already moved. IRA is instructed to list again after anything changes.
 - **Like `open_app`, this only works when the agent runs on your own machine.**
   There's no display on LiveKit Cloud, so `BrowserUnavailableError` is caught
-  and turned into a spoken explanation instead of a dropped turn. Selenium is
+  and turned into a spoken explanation instead of a dropped turn. Playwright is
   imported lazily for the same reason.
 - **Everything is capped**, because page content is both spoken aloud and
   carried in context on every later turn: 40 elements per listing, 4000
   characters of page text, 80 characters per element label. IRA is told to
   summarize a page rather than recite it.
-- **Page loads time out at 20 seconds**, well below Selenium's 30-second
-  default. On a voice call a long load is just silence, with no way for her to
-  explain herself.
+- **Page loads time out at 20 seconds** and action preparation is bounded.
+  Playwright waits for actionability and sends native input; it does not force
+  clicks through obstructions or use JavaScript to bypass them.
+  Startup is also capped at 20 seconds. For main-document controls, the final
+  native mouse input follows a fresh combined label, bounds and hit-ownership
+  check, avoiding a repeated animation-frame wait on slow pages. Iframe and
+  shadow-root controls retain Playwright's native element safeguards.
 
-### Signed-in Chrome or Brave and Spotify
+### Persistent Chrome or Brave profiles
 
 Set `IRA_BROWSER=chrome` (the default) or `IRA_BROWSER=brave` before starting
 the agent. The browser reuses the Windows profile named by
 `%LOCALAPPDATA%\\IRA\\Browser`, so it can run alongside your normal browser
-without a profile-lock error. Sign in to Spotify once in IRA's browser window;
-the cookies remain available on later runs. To use a specific profile directory,
+without a profile-lock error. Site cookies remain available on later runs.
+To use a specific profile directory,
 set `IRA_BROWSER_PROFILE` to its full path.
 
 ```powershell
@@ -212,29 +240,32 @@ $env:IRA_BROWSER_PROFILE_NAME = "Default"
 uv run python src/agent.py console
 ```
 
-Ask IRA to open Spotify in Chrome or Brave, then say "play", "pause", "rewind ten seconds",
-or "forward thirty seconds". These controls operate on the Spotify Web Player
-tab in IRA's persistent profile. To see the saved workflow files, say
-"open the workflows folder"; IRA opens the local folder in Explorer instead of
-+trying to navigate to it as a website.
+Missing Brave returns an error without opening another browser. To see the
+saved workflow files, say "open the workflows folder"; IRA opens the local
+folder in Explorer instead of trying to navigate to it as a website.
 
-Every Selenium call blocks, so each one is dispatched through
-`asyncio.to_thread`. A synchronous `driver.get()` on the event loop would stall
-the audio stream carrying IRA's own voice, and she'd audibly stutter
-mid-sentence.
+All Playwright objects belong to one dedicated browser thread. Requests copy
+the current task context into that thread and marshal results back through
+`asyncio.to_thread`, keeping blocking browser work off the voice event loop.
+Agent cleanup closes the context and browser worker after active host work settles.
 
 ## Memory
 
-Open **Settings → Your Profile** to save your name, optional age, occupation,
-and preferences. These fields are available before the next greeting, and edits
+Open **System Controls → Your Profile** to save your name, optional age,
+occupation, location, languages, interests, goals, preferences, and a freeform
+About me description of your background, routines, or anything useful for IRA.
+IRA always addresses you as **Boss** or **Sir**; your saved name is profile
+information for identity tasks and never a form of direct address.
+These fields are available before the next greeting, and edits
 reach a running IRA session at its next quiet moment. Blank fields stay absent.
 Explicit voice corrections such as “my name is Alex” update this same profile.
+Existing profiles are upgraded automatically without losing saved details.
 
-**Settings → Memory and Context** controls automatic summaries and cross-session
+**System Controls → Memory and Context** controls automatic summaries and cross-session
 recall. Inspect and search remembered facts and conversation records, delete
 individual records, or clear conversation memory while keeping your profile.
-Profile reset is separate. The default application context budget is **16,000
-tokens**, with summary preparation around **12,000**; these are application
+Profile reset is separate. The default application context budget is **20,000
+tokens**, with summary preparation around **16,000**; these are application
 settings, not a claim about the model's full capacity. Advanced settings expose
 the budget, trigger, recent-turn count and text summarizer model.
 
@@ -263,11 +294,45 @@ Implementation: [`src/personal_memory.py`](src/personal_memory.py),
 
 ## Workflows and durable notes
 
-Repeatable procedures are stored as editable Markdown files in `workflows/`.
-IRA can save, list, retrieve, and delete them with voice commands. Say things
-like "remember this workflow" or "always do it this way" after completing a
-multi-step task. Use `IRA_WORKFLOWS_DIR` to move the workflow library to a
-backed-up location.
+The primary procedure library uses `skills/<category>/<name>/SKILL.md`.
+Following Hermes's progressive disclosure, IRA discovers compact descriptions
+with `skills_list`, reads full instructions or supporting files with `skill_view`,
+then uses `run_skill` to bind a relevant procedure to the current request before
+actual tool calls and observations. Loading never counts as execution. Selection
+uses canonical identities, validated inputs and the current goal; unrelated
+skills are not fallback choices. `skill_manage` edits ordinary procedures.
+
+Optional compiled workflows remain in `workflows/`, with draft review, checked
+actions and recorded runs. An explicitly requested, validated draft may run once
+without permanently enabling automatic reuse. `list_skills` identifies both modes;
+use `procedure:category/name` or `workflow:slug` to resolve naming collisions.
+`run_skill` on a procedure returns `procedure_ready` and instructions for IRA
+to follow; it does not run a compiled interpreter or complete the action.
+Use `IRA_WORKFLOWS_DIR` to move the compiled workflow library.
+
+Adaptive package state, immutable versions and task-bound run history live in
+`skills/.procedures.sqlite3`. The shipped `skills/reviewed.json` enables only exact
+reviewed package digests; edits, including support files, invalidate older plans.
+The Skills dashboard separates one-time execution from automatic eligibility and
+shows active adaptive runs with Stop controls. Private input values are redacted
+from run records and learned source.
+
+The `research-topic` procedure gathers actually read sources. `research_status`
+reports the current source ledger; completed research supplies a sourced summary
+to `finish_request`. Requested depth and source restrictions override defaults.
+Clearly established actions use deterministic task checks; unresolved semantics
+can use the configured judge. Stop, stale-target and uncertain-effect checks
+remain active, while unchanged tasks renew default execution checkpoints.
+
+Spotify's dedicated tools, procedure and adapters have been retired. Generic
+app/browser tools still follow explicit current requests; unrelated media actions
+cannot be substituted for research or another task. Historical evaluation records
+remain as evidence.
+
+The [November 7 execution evaluation](docs/research/2026-11-07-hermes-execution-evaluation.md)
+records the routing repairs, regression checks, live model evaluations, and
+observed Aaya Sher playback in Brave. It also describes the bounds on automatic
+continuation and the remaining evaluation limits.
 
 Important facts, preferences, unfinished tasks, and outcomes can be saved as
 durable notes. IRA loads a small recent-note set at startup and searches the
@@ -282,7 +347,7 @@ my preferences?" using the `list_preferences` tool. Remove one with the normal
 
 ### Workflow execution and terminal status
 
-Detailed workflows use explicit steps such as `spotify_control: action=play`,
+Detailed workflows use explicit steps such as `browse_to: url="https://example.com"`,
 an `allowed_tools` list, prerequisites, verification rules, and recovery notes.
 IRA executes only those declared actions and stops at the first unverified
 failure. Workflows with at most five linear deterministic steps use the
@@ -455,9 +520,11 @@ For turn-level checks that don't need a live session, the LiveKit Agents [testin
 
 [`tests/test_agent.py`](tests/test_agent.py) guards the realtime-only constraint — no separate STT or TTS stage, and a `GEMINI_LIVE_MODEL` that actually supports `bidiGenerateContent` and `generate_reply()` — plus the IRA persona, the pinned voice, and the `open_app` tool. The PyAutoGUI key sequence is asserted against a fake module, so the tests never touch your desktop.
 
-[`tests/test_browser_and_memory.py`](tests/test_browser_and_memory.py) covers the two new modules directly: element description and numbering, the click-invalidates-numbering rule, the JavaScript click fallback for intercepted clicks, `https` inference for spoken addresses, and every memory path including dedupe, the FTS5-syntax-in-speech case, seed ranking, and durability across a reopen.
+[`tests/test_browser_and_memory.py`](tests/test_browser_and_memory.py) covers element description and numbering, reference invalidation, refusal of obstructed clicks, `https` inference for spoken addresses, and memory paths including dedupe, FTS5 syntax, seed ranking and durability.
 
-Neither file starts a real Chrome or touches the real memory database, and that's a hard rule rather than a convenience. These tools act on your actual machine — a suite that opens windows and saves facts is one nobody can run while working. The browser tests drive `BrowserController` through a fake driver injected into `_driver`; the agent-level tool tests pass a fake browser into `Assistant(browser=...)`; the memory tests get a `tmp_path` database.
+These unit tests use native Playwright-shaped fixtures, injected agent browsers
+and temporary memory databases. Real browser, provider and desktop evaluations
+are opt-in and operate on isolated fixtures.
 
 Two of the persona tests are identity guards rather than feature tests: one asserts the system prompt never names a borrowed character (IRA is meant to *behave* like Iron Man's assistant, not *be* her — naming the character invites the model to play its own idea of her), and one asserts the prompt states the name isn't an acronym, since otherwise "what does IRA stand for?" gets a confidently invented expansion.
 
@@ -530,13 +597,10 @@ and Run/Stop through the connected voice agent. A draft must pass validation and
 be explicitly enabled. Startup includes a compact catalog; specialist browser,
 desktop, memory and skill-management tools load through `load_capabilities`.
 
-Included procedures are **Open Desktop App**, **Open Web Page**, and **Play
-Spotify Playlist**. For example: “Run Open Web Page” checks `example.com` for
-“Example Domain”. Specify both the app and expected title for another app, or
-the URL and expected text for another web page. Spotify uses IRA's existing
-signed-in Chrome/Brave profile and requires observed audio plus matching player
-context; a changed Spotify selector stops the procedure instead of claiming
-success.
+Included procedures are **Open Desktop App** and **Open Web Page**. For example:
+“Run Open Web Page” checks `example.com` for “Example Domain”. Specify both the
+app and expected title for another app, or the URL and expected text for another
+web page.
 
 Every strict tool step has an observable check. Invalid later steps are rejected
 before execution, run versions are frozen, duplicate deliveries are not
@@ -557,14 +621,14 @@ Startup memory shares a 4,000-character budget and removes duplicate entries.
 draft with source-run provenance. It does not train model weights. Curator
 recommendations are review-only and honor pins.
 
-Current scope: strict actions cover app launch, web navigation, Spotify and
+Current scope: strict actions cover app launch, web navigation and
 screen capture. Click/type/mouse tools remain available through capability
 loading, but are not yet compiled skill actions. Visual `looks_like`, interactive
 `ask`/`say` steps, arbitrary shell commands, autonomous model compilation,
 automatic consolidation, and conversation-history compression beyond Gemini's
 existing sliding window are not enabled. Local automated checks cover the
-contracts; live Gemini audio and signed-in Spotify still need a manual smoke
-test on the intended machine/profile.
+contracts; live Gemini audio still needs a manual smoke test on the intended
+machine/profile.
 
 Validation commands from the renamed project folder:
 
@@ -637,7 +701,7 @@ uv run --no-sync python -m pytest tests/test_skill_desktop_live.py -q
 Remove-Item Env:IRA_RUN_DESKTOP_SMOKE
 ```
 
-The real Selenium form smoke passed, including clarification, escaped text,
+The former browser form smoke passed, including clarification, escaped text,
 value checks, click verification, duplicate delivery, and refusal cases. The
 Windows fixture was attempted but could not gain foreground focus; it refused
 before sending any input. Actual desktop input, live Gemini audio interruption,
@@ -718,7 +782,8 @@ installed here.
 Restart the local IRA agent and reconnect to load these changed tool schemas.
 `uv sync` installs the new Windows-only `uiautomation` dependency. Existing
 compiled skills keep their native-coordinate contract. The whole-desktop upgrade
-below extends voice pixel input to every monitor. ASCII-only desktop typing is unchanged.
+below extends voice pixel input to every monitor. The November Playwright and
+computer-use upgrade adds Unicode desktop typing and preview streams.
 Screenshot-only targeting still depends on the vision model: live tests exposed
 guessed locations, so named controls use accessibility IDs and IRA is instructed
 to ask when a target cannot be resolved confidently.

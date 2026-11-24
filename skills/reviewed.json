@@ -1,0 +1,9 @@
+{
+  "procedure:communication/send-whatsapp-message": "4b6dc437dfd7497026a9efc87b290c434675edc331e81b41076aed2acf3b7003",
+  "procedure:desktop/close-active-window": "dd1c1c819a6323a80e023730f553c8f88568960b106513474a8301329b87255a",
+  "procedure:desktop/open-desktop-app": "b49fdf8be2bde77e86580952a63906eae64cd050bf189fa86f77f4211252111f",
+  "procedure:system/log-error": "c5a68e62658cb1a1bd7fc21934b871b23481b16030bb2420edb51188ae81cfe7",
+  "procedure:web/fill-web-field": "f6d1963ebc651bcddfe187481c44185537249cd7e738004db485af84c6ab0b6f",
+  "procedure:web/open-web-page": "2c5c16c6577304cbd3d23383c848391fa62b2ba8eb66662d1dee2f80531129a9",
+  "procedure:web/research-topic": "e030f89a3b6178242336dd60e77b4020f269bebfa99cf12abb1f92313d75ff7b"
+}

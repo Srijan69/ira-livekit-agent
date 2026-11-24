@@ -8,7 +8,7 @@ import { NAV_ITEMS, type NavId } from "@/lib/nav";
 /**
  * Left navigation.
  *
- * Home and Settings are built. Other destinations are marked not-ready and
+ * Available destinations open their pages. Other destinations are marked not-ready and
  * route to a labelled empty state -- deliberately visible rather than hidden,
  * so the shape of the finished app is legible while being honest that the
  * pages don't exist yet.
@@ -96,7 +96,7 @@ function UserCard({ profile }: { profile?: UserProfile | null }) {
         <p className="flex items-center gap-1 text-[12px] font-medium text-text">
           <span className="truncate" title={identity.name}>{identity.name}</span>
         </p>
-        <p className="text-[10px] text-mute" title="Your profile in Settings">{profile?.name.trim() ? "Saved on this device" : "Set up in Settings"}</p>
+        <p className="text-[10px] text-mute" title="Your profile in System Controls">{profile?.name.trim() ? "Saved on this device" : "Set up in System Controls"}</p>
       </div>
     </div>
   );

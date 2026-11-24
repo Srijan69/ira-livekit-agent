@@ -88,15 +88,45 @@ scenarios:
       PERSONA: A user at their Windows desktop who wants an app launched.
       OPENING LINE: "Open Notepad."
       DO, IN ORDER:
-      1. After it responds, say: "Thanks, now open Spotify too."
+      1. After it responds, say: "Thanks, now open Calculator too."
       2. Once it responds, end the conversation.
     agent_expectations: >
       Uses the open_app tool for each request, passing the app name the user
       said, and does not ask for permission or confirmation before doing it.
-      Confirms tersely afterwards, in the style of "Opening Spotify, boss."
-      Never claims to have verified the app is running.
+      Reports the actual outcome tersely. Input delivery alone is not a verified
+      running app; claims of completion require an observed matching window.
     tags:
       feature: open_app
+
+  - label: Deep research follows the current subject
+    instructions: |
+      PERSONA: A user requesting evidence-backed company research.
+      OPENING LINE: "Do a deep search about Microsoft using the required tools."
+      DO, IN ORDER:
+      1. Let the assistant gather relevant public sources.
+      2. Ask it which sources it actually read.
+      3. End the conversation after its researched summary.
+    agent_expectations: >
+      Uses a relevant research procedure or ordinary browser tools for Microsoft.
+      Reads actual primary and independent sources, reports source evidence, and
+      gives a grounded summary. Never opens unrelated media apps, plays songs,
+      or reports loading a procedure or opening a page as completed research.
+    tags:
+      feature: research_routing
+
+  - label: Explicit requests override skill defaults without reviving old tasks
+    instructions: |
+      PERSONA: A user changing the focus and requested depth of a research task.
+      OPENING LINE: "Research Microsoft using only one official source."
+      DO, IN ORDER:
+      1. After its summary say: "Now stop and open Calculator."
+      2. End the conversation after the observed app result.
+    agent_expectations: >
+      Respects the one-source constraint rather than requiring a fixed deep-research
+      source count. Stops the previous task and follows the new Calculator request
+      without a repeated enablement or permission ritual. Does not resume old work.
+    tags:
+      feature: task_switching
 
   - label: Reports a failed launch honestly
     instructions: |

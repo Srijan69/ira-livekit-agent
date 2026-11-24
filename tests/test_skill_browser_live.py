@@ -1,7 +1,7 @@
-"""Opt-in Selenium smoke using a disposable browser and loopback-only page.
+"""Opt-in Playwright smoke using a disposable browser and loopback-only page.
 
 Run with IRA_RUN_BROWSER_SMOKE=1. No personal browser profile or provider keys
-are used. Normal unit runs skip browser startup and driver resolution.
+are used. Normal unit runs skip browser startup and browser resolution.
 """
 
 import json
@@ -19,7 +19,7 @@ from skill_runs import SkillRunStore
 from telemetry import SessionStatusReporter
 
 pytestmark = pytest.mark.skipif(
-    os.getenv("IRA_RUN_BROWSER_SMOKE") != "1", reason="opt-in real Selenium fixture"
+    os.getenv("IRA_RUN_BROWSER_SMOKE") != "1", reason="opt-in real Playwright fixture"
 )
 
 HTML = b"""<!doctype html><title>IRA browser fixture</title>
@@ -31,9 +31,7 @@ this.dataset.count=String(Number(this.dataset.count||0)+1)">Finish</button>
 
 
 @pytest.fixture
-def real_browser():
-    from selenium import webdriver
-    from selenium.webdriver.chrome.options import Options
+def real_browser(tmp_path, monkeypatch):
 
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self):
@@ -49,13 +47,9 @@ def real_browser():
     server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
-    browser = BrowserController()
-    options = Options()
-    options.add_argument("--headless=new")
-    options.add_argument("--window-size=1100,800")
+    monkeypatch.setenv("IRA_BROWSER_PROFILE", str(tmp_path / "profile" / "Default"))
+    browser = BrowserController(headless=True, browser="chrome")
     try:
-        browser._driver = webdriver.Chrome(options=options)
-        browser._driver.set_page_load_timeout(15)
         yield browser, f"http://127.0.0.1:{server.server_port}/"
     finally:
         browser.close()
@@ -134,7 +128,7 @@ async def test_real_browser_skill_waits_types_verifies_and_never_replays(
         assert result.status == "done", result.message
         assert result.completed_steps == 4
         assert (
-            browser._driver.find_element("id", "name").get_attribute("value")
+            browser.evaluate("() => document.querySelector('#name').value")
             == 'Ada "Lovelace" \\ example'
         )
         repeated = await service.run(
@@ -145,7 +139,7 @@ async def test_real_browser_skill_waits_types_verifies_and_never_replays(
         )
         assert repeated.status == "done"
         assert (
-            browser._driver.find_element("id", "finish").get_attribute("data-count")
+            browser.evaluate("() => document.querySelector('#finish').dataset.count")
             == "1"
         )
         assert "Lovelace" not in json.dumps(service.status("live-browser"))
@@ -162,5 +156,5 @@ def test_real_browser_rejects_ambiguity_password_fields_and_url_drift(real_brows
         browser.type_selector("#password", "fixture-only", url)
     with pytest.raises(ValueError, match="expected URL"):
         browser.type_selector("#name", "wrong scope", url + "different")
-    assert browser._driver.find_element("id", "password").get_attribute("value") == ""
-    assert browser._driver.find_element("id", "name").get_attribute("value") == ""
+    assert browser.evaluate("() => document.querySelector('#password').value") == ""
+    assert browser.evaluate("() => document.querySelector('#name').value") == ""

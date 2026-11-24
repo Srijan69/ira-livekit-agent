@@ -22,19 +22,45 @@ type ProfileDraft = {
   name: string;
   age: string;
   occupation: string;
+  location: string;
+  languages: string;
+  interests: string;
+  goals: string;
+  about_me: string;
   preferences: string;
 };
 const blankProfile: ProfileDraft = {
   name: "",
   age: "",
   occupation: "",
+  location: "",
+  languages: "",
+  interests: "",
+  goals: "",
+  about_me: "",
   preferences: "",
+};
+const profilePlaceholders: Record<keyof ProfileDraft, string> = {
+  name: "Your name (profile information)",
+  age: "Optional",
+  occupation: "Your role, work, or studies",
+  location: "City, region, or country",
+  languages: "For example, Telugu and English",
+  interests: "Hobbies, subjects you enjoy, and favorite activities",
+  goals: "What you want to learn, build, or work toward",
+  about_me: "Your background, family, studies, work, and daily life",
+  preferences: "How you like answers, support, and reminders",
 };
 function profileDraft(profile: UserProfile): ProfileDraft {
   return {
     name: profile.name,
     age: profile.age === null ? "" : String(profile.age),
     occupation: profile.occupation,
+    location: profile.location ?? "",
+    languages: profile.languages ?? "",
+    interests: profile.interests ?? "",
+    goals: profile.goals ?? "",
+    about_me: profile.about_me ?? "",
     preferences: profile.preferences,
   };
 }
@@ -149,6 +175,16 @@ export function ProfileSettings({ memory }: { memory: PersonalMemoryState }) {
       nextErrors.name = "Keep your name within 120 characters.";
     if (draft.occupation.length > 200)
       nextErrors.occupation = "Keep your occupation within 200 characters.";
+    if (draft.location.length > 200)
+      nextErrors.location = "Keep your location within 200 characters.";
+    if (draft.languages.length > 200)
+      nextErrors.languages = "Keep languages within 200 characters.";
+    if (draft.interests.length > 1500)
+      nextErrors.interests = "Keep interests within 1,500 characters.";
+    if (draft.goals.length > 1500)
+      nextErrors.goals = "Keep goals within 1,500 characters.";
+    if (draft.about_me.length > 4000)
+      nextErrors.about_me = "Keep About me within 4,000 characters.";
     if (draft.preferences.length > 4000)
       nextErrors.preferences = "Keep preferences within 4,000 characters.";
     setErrors(nextErrors);
@@ -186,7 +222,7 @@ export function ProfileSettings({ memory }: { memory: PersonalMemoryState }) {
     else {
       acceptProfile(result);
       setConfirmReset(false);
-      setSuccess("Profile reset. Your profile fields are now empty.");
+      setSuccess("Profile reset. All your profile information is now empty.");
     }
   }
 
@@ -215,14 +251,17 @@ export function ProfileSettings({ memory }: { memory: PersonalMemoryState }) {
           .filter(Boolean)
           .join(" ") || undefined,
       maxLength,
+      placeholder: profilePlaceholders[field],
     };
     return (
       <Field id={id} label={label} help={help} error={errors[field]}>
-        {field === "preferences" ? (
+        {field === "preferences" ||
+        field === "interests" ||
+        field === "goals" ||
+        field === "about_me" ? (
           <textarea
             {...properties}
-            rows={5}
-            placeholder="How you like IRA to help, interests, or things to remember"
+            rows={field === "about_me" ? 7 : field === "preferences" ? 5 : 4}
           />
         ) : (
           <input
@@ -232,13 +271,6 @@ export function ProfileSettings({ memory }: { memory: PersonalMemoryState }) {
             max={field === "age" ? 130 : undefined}
             step={field === "age" ? 1 : undefined}
             autoComplete={field === "name" ? "name" : "off"}
-            placeholder={
-              field === "age"
-                ? "Optional"
-                : field === "name"
-                  ? "What should IRA call you?"
-                  : "Your role or work"
-            }
           />
         )}
       </Field>
@@ -253,12 +285,23 @@ export function ProfileSettings({ memory }: { memory: PersonalMemoryState }) {
             Your Profile
           </h2>
           <p className="mt-1.5 text-[12px] leading-relaxed text-dim">
-            A little about you, so IRA can make the conversation yours.
+            Tell IRA about your life, work, interests, and goals so it can
+            understand you better. Share as much or as little as you like.
           </p>
         </div>
         <span className="connection-provider-icon">
           <UserRound size={19} />
         </span>
+      </div>
+      <div className="connection-notice">
+        <ShieldCheck size={17} />
+        <p>
+          <strong className="text-text">
+            IRA always addresses you as Boss or Sir.
+          </strong>{" "}
+          This rule is permanent. Your saved name is profile information; IRA
+          never uses it to address you.
+        </p>
       </div>
       {!memory.available && (
         <p className="connection-notice">
@@ -297,10 +340,17 @@ export function ProfileSettings({ memory }: { memory: PersonalMemoryState }) {
           aria-busy={memory.savingProfile}
         >
           <legend className="sr-only">Profile details</legend>
+          <div className="profile-wide">
+            <h3 className="text-[14px] font-semibold">The basics</h3>
+            <p className="connection-field-help">
+              All fields are optional. Leave a field blank to keep it empty or
+              clear its saved information.
+            </p>
+          </div>
           {input(
             "name",
             "Name",
-            "All profile fields are optional. Blank fields stay empty.",
+            "Your name is saved as background information, up to 120 characters.",
             120,
           )}
           {input(
@@ -308,14 +358,68 @@ export function ProfileSettings({ memory }: { memory: PersonalMemoryState }) {
             "Age (optional)",
             "A saved age from 0 to 130; IRA will not infer or advance it.",
           )}
+          {input(
+            "occupation",
+            "Occupation",
+            "Your work, role, or studies, up to 200 characters.",
+            200,
+          )}
+          {input(
+            "location",
+            "Location",
+            "Where you live or are based, up to 200 characters.",
+            200,
+          )}
           <div className="profile-wide">
-            {input("occupation", "Occupation", undefined, 200)}
+            {input(
+              "languages",
+              "Languages",
+              "Languages you speak or prefer, up to 200 characters.",
+              200,
+            )}
+          </div>
+          <div className="profile-wide">
+            <h3 className="text-[14px] font-semibold">Your life and background</h3>
+            <p className="connection-field-help">
+              Give IRA the bigger picture: your story, everyday life, and what
+              matters to you.
+            </p>
+          </div>
+          <div className="profile-wide">
+            {input(
+              "about_me",
+              "About me",
+              "Share your background, family, education, work, routines, or other context, up to 4,000 characters.",
+              4000,
+            )}
+          </div>
+          <div className="profile-wide">
+            <h3 className="text-[14px] font-semibold">Interests and goals</h3>
+          </div>
+          <div className="profile-wide">
+            {input(
+              "interests",
+              "Interests",
+              "Topics, hobbies, and activities you enjoy, up to 1,500 characters.",
+              1500,
+            )}
+          </div>
+          <div className="profile-wide">
+            {input(
+              "goals",
+              "Goals",
+              "Your ambitions, current projects, or things you want help achieving, up to 1,500 characters.",
+              1500,
+            )}
+          </div>
+          <div className="profile-wide">
+            <h3 className="text-[14px] font-semibold">How IRA can help</h3>
           </div>
           <div className="profile-wide">
             {input(
               "preferences",
               "Preferences",
-              "Share response preferences, interests, or other useful context.",
+              "Share how you like IRA to respond and support you, up to 4,000 characters.",
               4000,
             )}
           </div>
@@ -382,8 +486,9 @@ export function ProfileSettings({ memory }: { memory: PersonalMemoryState }) {
           aria-label="Reset profile confirmation"
         >
           <p>
-            Reset your name, age, occupation, and preferences? Conversation
-            memory is managed separately.
+            Clear all your profile information, including your background,
+            interests, goals, and preferences? IRA will still address you as
+            Boss or Sir. Conversation memory is managed separately.
           </p>
           <div className="memory-action-buttons">
             <button
@@ -420,8 +525,8 @@ type SettingsDraft = {
 };
 const defaultDraft: SettingsDraft = {
   enabled: true,
-  context_budget: "16000",
-  summary_trigger: "12000",
+  context_budget: "20000",
+  summary_trigger: "16000",
   recent_turns: "12",
   summarizer_model: "gemini-3.8-flash",
 };

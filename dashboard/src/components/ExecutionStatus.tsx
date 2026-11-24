@@ -17,6 +17,8 @@ import {
   type ExecutionStep,
 } from "@/lib/execution";
 import type { OrbState } from "@/lib/orbState";
+import { EMPTY_COMPUTER_USE, type ComputerUseState } from "@/lib/computerUse";
+import { ComputerUsePreview } from "./ComputerUsePreview";
 
 // A bowed surface, shared by the glass clipping and its illuminated rim.
 // Keep the contents as HTML so selection, scrolling and keyboard controls work.
@@ -150,12 +152,14 @@ export function ExecutionStatus({
   now,
   onClear,
   animate,
+  computerUse = EMPTY_COMPUTER_USE,
 }: {
   activities: ExecutionActivity[];
   state: OrbState;
   now: number;
   onClear: () => void;
   animate: boolean;
+  computerUse?: ComputerUseState;
 }) {
   const [expanded, setExpanded] = useState(true);
   const id = useId();
@@ -245,6 +249,7 @@ export function ExecutionStatus({
       </div>
 
       <div id={historyId} className="execution-history" hidden={!expanded}>
+        <ComputerUsePreview model={computerUse} connected={connected} now={now} animate={animate} activities={activities} />
         {sorted.length > 0 && (
           <>
             <div className="execution-history-heading">

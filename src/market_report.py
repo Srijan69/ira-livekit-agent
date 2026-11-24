@@ -279,24 +279,18 @@ def scrape_trending_assets(
                 mock_uri = DEFAULT_MOCK_FIXTURE.resolve().as_uri()
                 browser.navigate(mock_uri)
 
-            driver = getattr(browser, "_driver", None)
-            if driver is None and hasattr(browser, "_require_driver"):
+            # Fixed extraction scripts execute only on the browser owner thread.
+            if hasattr(browser, "evaluate"):
                 try:
-                    driver = browser._require_driver()
-                except Exception:
-                    driver = None
-
-            # Attempt JavaScript extraction if driver supports it
-            if driver is not None and hasattr(driver, "execute_script"):
-                try:
-                    raw_items = driver.execute_script(
+                    raw_items = browser.evaluate(
                         r"""
+                        maxAssets => {
                         const results = [];
                         const rows = document.querySelectorAll(
                             '[data-test*="market-row"], [data-test*="trending-row"], .yf-row, table tbody tr, table tr'
                         );
                         for (const row of rows) {
-                            if (results.length >= arguments[0]) break;
+                            if (results.length >= maxAssets) break;
                             const nameEl = row.querySelector('[data-field="name"], .name, td:nth-child(2), td:nth-child(1)');
                             const priceEl = row.querySelector('[data-field="price"], .price, td:nth-child(3)');
                             const changeEl = row.querySelector('[data-field="change"], .change, td:nth-child(4)');
@@ -319,6 +313,7 @@ def scrape_trending_assets(
                             }
                         }
                         return results;
+                        }
                         """,
                         max_assets,
                     )
@@ -340,8 +335,8 @@ def scrape_trending_assets(
                 except Exception as js_exc:
                     logger.debug("Browser script extraction fallback: %s", js_exc)
 
-            # Fallback to page source
-            page_src = getattr(driver, "page_source", None)
+            # Fallback to HTML through the same marshalled browser boundary.
+            page_src = browser.page_html() if hasattr(browser, "page_html") else None
             if page_src:
                 return _extract_assets_from_html_string(page_src, max_assets=max_assets)
 

@@ -264,6 +264,7 @@ async def test_startup_does_not_loop_on_an_oversized_whole_tool_group(
 ):
     path = tmp_path / "memory.sqlite3"
     store = PersonalMemoryStore(path)
+    store.save_settings({"context_budget": 16000, "summary_trigger": 12000})
     cid = store.start_conversation()
     store.append_item(
         cid,

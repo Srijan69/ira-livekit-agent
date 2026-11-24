@@ -130,7 +130,9 @@ async def test_open_app_manual_events_bind_to_its_call(status_events) -> None:
     assistant = Assistant(reporter=reporter)
 
     with patch("agent._launch_via_start_menu"):
-        result = await assistant.open_app(tool_context("app-1", "open_app"), "Spotify")
+        result = await assistant.open_app(
+            tool_context("app-1", "open_app"), "Calculator"
+        )
 
     assert "Asked Windows" in result
     assert [e["state"] for e in events] == ["DELEGATING", "RUNNING", "DONE"]

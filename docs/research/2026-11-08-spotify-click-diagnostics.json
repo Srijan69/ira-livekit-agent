@@ -1,0 +1,200 @@
+{
+  "track": "Aaya Sher",
+  "artist": "Anirudh Ravichander",
+  "status": "blocked",
+  "reason": "Spotify failed in Brave: ElementHandle.click: Timeout 500ms exceeded.\nCall log:\n  - attempting click action\n    - waiting for element to be visible, enabled and stable\n. Inspect the player; do not report playback as successful.",
+  "player": {
+    "available": true,
+    "playing": false,
+    "position_seconds": 74,
+    "title": "DIA DELÍCIA - Slowed",
+    "artists": [
+      "Nakama",
+      "ΣP"
+    ],
+    "track_path": ""
+  },
+  "player_dom": {
+    "text": "DIA DELÍCIA - Slowed\nNakama, ΣP\n1:14\nChange progress\n1:24\nChange volume",
+    "links": [
+      {
+        "text": "DIA DELÍCIA - Slowed",
+        "href": "/album/3bT53CJPMsSXSn0vDAX2Do"
+      },
+      {
+        "text": "Nakama",
+        "href": "/artist/1kd6WqngBvP0Vthu1sGI0j"
+      },
+      {
+        "text": "ΣP",
+        "href": "/artist/2Q3xviVw2VXFRXtsF2gpR1"
+      }
+    ],
+    "titleNodes": [
+      {
+        "tag": "DIV",
+        "testid": "now-playing-widget-v2",
+        "title": null,
+        "text": "DIA DELÍCIA - Slowed\nNakama, ΣP"
+      },
+      {
+        "tag": "DIV",
+        "testid": "cover-art-container",
+        "title": null,
+        "text": ""
+      },
+      {
+        "tag": "DIV",
+        "testid": "cover-drop-target",
+        "title": null,
+        "text": ""
+      },
+      {
+        "tag": "BUTTON",
+        "testid": "cover-art-button",
+        "title": null,
+        "text": ""
+      },
+      {
+        "tag": "svg",
+        "testid": "track",
+        "title": null,
+        "text": ""
+      },
+      {
+        "tag": "IMG",
+        "testid": "cover-art-image",
+        "title": null,
+        "text": ""
+      },
+      {
+        "tag": "A",
+        "testid": "context-item-link",
+        "title": null,
+        "text": "DIA DELÍCIA - Slowed"
+      },
+      {
+        "tag": "SPAN",
+        "testid": "now-playing-widget-v2-byline",
+        "title": null,
+        "text": "Nakama, ΣP"
+      },
+      {
+        "tag": "DIV",
+        "testid": "player-controls",
+        "title": null,
+        "text": "1:14\nChange progress\n1:24"
+      },
+      {
+        "tag": "DIV",
+        "testid": "general-controls",
+        "title": null,
+        "text": ""
+      },
+      {
+        "tag": "BUTTON",
+        "testid": "control-button-skip-back",
+        "title": null,
+        "text": ""
+      },
+      {
+        "tag": "BUTTON",
+        "testid": "control-button-playpause",
+        "title": null,
+        "text": ""
+      },
+      {
+        "tag": "BUTTON",
+        "testid": "control-button-skip-forward",
+        "title": null,
+        "text": ""
+      },
+      {
+        "tag": "BUTTON",
+        "testid": "control-button-repeat",
+        "title": null,
+        "text": ""
+      },
+      {
+        "tag": "DIV",
+        "testid": "playback-position",
+        "title": null,
+        "text": "1:14"
+      },
+      {
+        "tag": "DIV",
+        "testid": "playback-progressbar",
+        "title": null,
+        "text": "Change progress"
+      },
+      {
+        "tag": "DIV",
+        "testid": "progress-bar",
+        "title": null,
+        "text": ""
+      },
+      {
+        "tag": "DIV",
+        "testid": "progress-bar-background",
+        "title": null,
+        "text": ""
+      },
+      {
+        "tag": "DIV",
+        "testid": "progress-bar-handle",
+        "title": null,
+        "text": ""
+      },
+      {
+        "tag": "DIV",
+        "testid": "playback-duration",
+        "title": null,
+        "text": "1:24"
+      }
+    ],
+    "alerts": [
+      "Choose a languageThis updates what you read on open.spotify.comEnglishEnglishAfrikaansAfrikaansአማርኛAmharicالعَرَبِيَّةArabicعربي مصريArabic (Egypt)العَرَبِيَّة مغربيArabic (Morocco)العربية السعوديةArabic (Saudi Arabia)AzərbaycancaAzerbaijaniБългарскиBulgarianभोजपुरीBhojpuriবাংলাBengaliBosanskiBosnia",
+      "LocationAlbaniaAlgeriaAndorraAngolaAntigua and BarbudaArgentinaArmeniaAustraliaAustriaAzerbaijanBahrainBangladeshBarbadosBelarusBelgiumBelizeBeninBhutanBoliviaBosnia and HerzegovinaBotswanaBrazilBrunei DarussalamBulgariaBurkina FasoBurundiCabo VerdeCambodiaCameroonCanadaChadChileColombiaComorosCosta"
+    ]
+  },
+  "click_trace": [
+    {
+      "phase": "before-trial",
+      "label": "Play Aaya Sher by Anirudh Ravichander, Jangi Reddy, Arjun Chandy, Kasarla Shyam",
+      "connected": true,
+      "bounds": [
+        402.6000061035156,
+        193.60000610351562,
+        16,
+        16
+      ],
+      "display": "flex",
+      "visibility": "visible",
+      "opacity": "1",
+      "disabled": false
+    },
+    {
+      "phase": "after-trial",
+      "label": "Play Aaya Sher by Anirudh Ravichander, Jangi Reddy, Arjun Chandy, Kasarla Shyam",
+      "connected": true,
+      "bounds": [
+        402.6000061035156,
+        193.60000610351562,
+        16,
+        16
+      ],
+      "display": "flex",
+      "visibility": "visible",
+      "opacity": "1",
+      "disabled": false
+    }
+  ],
+  "pointer_events": [
+    {
+      "type": "pointerover",
+      "trusted": true
+    }
+  ],
+  "browser": "brave",
+  "elapsed_seconds": 12.27
+}

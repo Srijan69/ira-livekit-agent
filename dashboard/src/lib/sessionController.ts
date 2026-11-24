@@ -11,6 +11,7 @@ import type {
 import type { AgentLifecycle } from "./orbState";
 import { EMPTY_TRACKER, trackStatus, type StatusTracker } from "./statusTracker";
 import { clearFinishedExecution, expireExecution, interruptExecution, trackExecution, type ExecutionActivity, type ExecutionEvent } from "./execution";
+import { COMPUTER_OBSERVATION_MAX_BYTES, COMPUTER_OBSERVATION_TOPIC, parseComputerObservation } from "@shared/computerUse";
 
 /**
  * Owns the connection between the dashboard and IRA.
@@ -68,6 +69,13 @@ export type RoomLike = {
   // `never[]` so a listener with any specific signature is accepted.
   on(event: string, listener: (...args: never[]) => void): unknown;
   off(event: string, listener: (...args: never[]) => void): unknown;
+  registerTextStreamHandler?: (topic: string, listener: (reader: ComputerStreamReader, participant: { identity: string }) => void) => void;
+  unregisterTextStreamHandler?: (topic: string) => void;
+};
+
+type ComputerStreamReader = AsyncIterable<string> & {
+  info?: { size?: number };
+  withAbortSignal?: (signal: AbortSignal) => ComputerStreamReader;
 };
 
 export type { ProcessSnapshot };
@@ -169,6 +177,8 @@ export class SessionController {
   private rejoinTimer: Timer | null = null;
   private unsubscribeProcess: (() => void) | null = null;
   private activityTimer: Timer | null = null;
+  private computerStreamEpoch = 0;
+  private readonly computerStreams = new Set<AbortController>();
 
   constructor(private readonly options: ControllerOptions) {}
 
@@ -542,10 +552,15 @@ export class SessionController {
     ];
 
     for (const [event, handler] of handlers) room.on(event, handler);
+    room.registerTextStreamHandler?.(COMPUTER_OBSERVATION_TOPIC, (reader, participant) => {
+      void this.readComputerObservation(room, reader, participant.identity);
+    });
     this.handlers = handlers;
   }
 
   private unbindRoom(room: RoomLike): void {
+    room.unregisterTextStreamHandler?.(COMPUTER_OBSERVATION_TOPIC);
+    this.cancelComputerStreams();
     for (const [event, handler] of this.handlers) room.off(event, handler);
     this.handlers = [];
   }
@@ -626,8 +641,44 @@ export class SessionController {
   }
 
   private interruptActivities(phase: "cancelled" | "unavailable" = "cancelled"): void {
+    this.cancelComputerStreams();
     if (this.activityTimer) { clearTimeout(this.activityTimer); this.timers.delete(this.activityTimer); this.activityTimer = null; }
     this.set({ activities: interruptExecution(this.state.activities, (this.options.now ?? Date.now)(), phase), tracker: EMPTY_TRACKER });
+  }
+
+  private cancelComputerStreams(): void {
+    this.computerStreamEpoch++;
+    for (const controller of this.computerStreams) controller.abort();
+    this.computerStreams.clear();
+  }
+
+  private async readComputerObservation(room: RoomLike, reader: ComputerStreamReader, identity: string): Promise<void> {
+    const who = room.remoteParticipants.get(identity);
+    const epoch = this.computerStreamEpoch;
+    const current = () => !this.disposed && this.room === room && room.state === ConnectionState.Connected
+      && this.state.connection === "connected" && epoch === this.computerStreamEpoch
+      && who?.kind === ParticipantKind.AGENT && room.remoteParticipants.get(identity) === who;
+    if (!current() || this.computerStreams.size >= 4 || (reader.info?.size ?? 0) > COMPUTER_OBSERVATION_MAX_BYTES) return;
+    const controller = new AbortController();
+    this.computerStreams.add(controller);
+    const timeout = setTimeout(() => controller.abort(), 15_000);
+    try {
+      const chunks: string[] = [];
+      let size = 0;
+      let fragments = 0;
+      for await (const chunk of reader.withAbortSignal?.(controller.signal) ?? reader) {
+        if (!current() || controller.signal.aborted || typeof chunk !== "string") return;
+        // Normal LiveKit streams use 15 KiB chunks. Bound pathological tiny fragments too.
+        if (++fragments > 2048 || chunk.length > COMPUTER_OBSERVATION_MAX_BYTES) { controller.abort(); return; }
+        size += new TextEncoder().encode(chunk).byteLength;
+        if (size > COMPUTER_OBSERVATION_MAX_BYTES) { controller.abort(); return; }
+        chunks.push(chunk);
+      }
+      if (!current() || controller.signal.aborted) return;
+      const event = parseComputerObservation(JSON.parse(chunks.join("")));
+      if (event) for (const listener of this.eventListeners) listener(event);
+    } catch { /* Invalid, interrupted or unfinished streams never become evidence. */ }
+    finally { clearTimeout(timeout); this.computerStreams.delete(controller); }
   }
 
   private armActivityExpiry(): void {

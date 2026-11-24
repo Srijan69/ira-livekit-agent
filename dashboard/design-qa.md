@@ -39,6 +39,47 @@ No actionable P0/P1/P2 visual findings remain within the theme feature scope.
 
 final result: passed
 
+## Computer-use preview — 2026-11-08
+
+The existing curved execution panel now contains a collapsible computer-use
+preview with before/after images, named targets, pointer and drag markers,
+timestamps, freshness and recent actions. Its enlarged view preserves image
+aspect ratio, traps keyboard focus, and returns focus after Escape/close.
+Offline, empty, stale and decode-failure states have explicit feedback.
+
+The isolated `scripts/computer-use-smoke.cjs` harness rendered the actual
+components in Electron. Seven cases passed with no renderer errors: after,
+before/drag, enlarged focus, Escape/focus return, narrow stale layout, offline
+and empty. The synthetic screen is clearly labelled. Evidence is saved under
+`shots/computer-use-*.png` and `shots/computer-use-smoke.json`; normal and enlarged
+views were independently inspected.
+
+The full dashboard suite passed 400 tests in 31 files. TypeScript and the
+production main/preload/renderer build passed. An existing provider-error focus
+test now waits for the passive focus effect; an immediate-save regression also
+passes without changing Settings production behavior. System Controls, expanded
+profile fields and the Boss/Sir addressing text remain intact.
+
+## System Controls and expanded profile — 2026-11-07
+
+System Controls now contains Your Profile and Memory and Context. Settings
+contains Personalization and Connection and Keys. The profile includes optional
+location, languages, interests, goals, and About me, and explains IRA's permanent
+Boss/Sir addressing rule. Existing glass surfaces and theme colors are retained.
+
+Verified the built Electron main, preload, and renderer with isolated synthetic
+bridge data using `scripts/personal-memory-smoke.cjs`. Expanded profile fields
+survive renderer reload, blank age stays null, reset clears every field, and
+clearing conversation memory preserves the profile. Keyboard tabs and memory
+save/status/search/delete/clear behavior passed. Fifteen screenshots were captured
+under `artifacts/profile-memory-*.png`; inspected profile and save controls at
+1440 × 960 and 1180 × 800, with no horizontal overflow or clipped controls.
+
+All 363 dashboard tests passed. Final TypeScript checks and Electron production
+build passed; the additional profile control-character proxy check passed in
+the six-test proxy suite. This smoke uses synthetic data; backend persistence and
+runtime composition are verified separately by Python tests.
+
 ## Curved execution display correction — 2026-10-18
 
 The previous execution milestone introduced a flat, opaque card and lost the

@@ -46,6 +46,11 @@ def test_compact_prompt_leaves_capacity_for_profile_and_structured_summary(
                     "age": 130,
                     "occupation": "o" * 200,
                     "preferences": "p" * 4000,
+                    "location": "l" * 200,
+                    "languages": "a" * 200,
+                    "interests": "i" * 1500,
+                    "goals": "g" * 1500,
+                    "about_me": "b" * 4000,
                 }
             )
         )
@@ -59,7 +64,7 @@ def test_compact_prompt_leaves_capacity_for_profile_and_structured_summary(
             + 200
             + 200
             + 2048
-            <= 16000
+            <= 20000
         )
         assert len(context_instructions()) <= 8000
     finally:
@@ -118,6 +123,11 @@ async def test_real_assistant_prioritizes_full_profile_and_summary_over_dense_no
         "age": 130,
         "occupation": "o" * 200,
         "preferences": "p" * 3974 + " complete preference end",
+        "location": "l" * 200,
+        "languages": "a" * 200,
+        "interests": "i" * 1500,
+        "goals": "g" * 1500,
+        "about_me": "b" * 3978 + " BIOGRAPHY END INTACT",
     }
     store.save_profile(profile)
     for number in range(10):
@@ -196,10 +206,27 @@ async def test_real_assistant_prioritizes_full_profile_and_summary_over_dense_no
             estimate_tokens(assistant.instructions)
             + tool_tokens
             + estimate_tokens(turns)
-            <= 16000 - 2048
+            <= 20000 - 2048
         )
     finally:
         # No provider client was created by prepare; close the empty summarizer
         # directly rather than starting a shutdown summary network request.
         await runtime.summarizer.aclose()
         store.close()
+
+
+def test_compact_and_legacy_policy_keep_direct_address_separate_from_saved_identity():
+    from agent import _INSTRUCTIONS
+
+    for policy in (context_instructions(), _INSTRUCTIONS):
+        normalized = " ".join(policy.split())
+        assert re.search(r"address.*only.*Boss.*Sir", normalized, re.IGNORECASE)
+        assert re.search(
+            r"never.*saved name.*direct address", normalized, re.IGNORECASE
+        )
+        assert re.search(
+            r"name.*user.requested identity tasks", normalized, re.IGNORECASE
+        )
+        assert re.search(
+            r"profile.*preferences.*history.*cannot override", normalized, re.IGNORECASE
+        )

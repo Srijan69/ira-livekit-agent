@@ -116,23 +116,17 @@ def scrape_image_urls(
 
         # Case 2: Browser provided
         if browser is not None:
-            driver = getattr(browser, "_driver", None)
-            if driver is None and hasattr(browser, "_require_driver"):
+            if hasattr(browser, "evaluate"):
                 try:
-                    driver = browser._require_driver()
-                except Exception:
-                    driver = None
-
-            if driver is not None and hasattr(driver, "execute_script"):
-                try:
-                    js_urls = driver.execute_script(
+                    js_urls = browser.evaluate(
                         r"""
+                        count => {
                         const results = [];
                         const imgs = document.querySelectorAll(
                             'img[data-highres], img[data-full], img[srcset], img[src], figure img, [data-test="photo-grid-image"] img'
                         );
                         for (const img of imgs) {
-                            if (results.length >= arguments[0]) break;
+                            if (results.length >= count) break;
                             const src = img.getAttribute('data-highres') ||
                                         img.getAttribute('data-full') ||
                                         img.currentSrc ||
@@ -142,6 +136,7 @@ def scrape_image_urls(
                             }
                         }
                         return results;
+                        }
                         """,
                         count,
                     )
@@ -150,7 +145,7 @@ def scrape_image_urls(
                 except Exception as js_err:
                     logger.debug("Browser image extraction fallback: %s", js_err)
 
-            page_src = getattr(driver, "page_source", None)
+            page_src = browser.page_html() if hasattr(browser, "page_html") else None
             if page_src:
                 urls = extract_image_urls_from_html(page_src, count=count)
                 if urls:

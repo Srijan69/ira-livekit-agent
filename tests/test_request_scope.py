@@ -64,6 +64,38 @@ async def test_request_is_immutable_and_duplicate_transcript_cannot_reopen_it():
         await act(scope, duplicate, "open_app", {"app_name": "Notepad"})
 
 
+@pytest.mark.parametrize("later_change", ["stop", "revoke", "suspend", "new_request"])
+async def test_normal_finish_receipt_allows_history_settlement_without_effect_authority(
+    later_change,
+):
+    scope = RequestScope()
+    request = scope.begin_request("Open Notepad", source_id="finished")
+    proposal = ActionProposal("open_app", {"app_name": "Notepad"})
+    permit = await scope.admit(request.id, proposal)
+    assert not scope.was_finished(request.id)
+    scope.finish(request.id)
+    assert scope.was_finished(request.id)
+    assert not scope.was_finished("another-request")
+    with pytest.raises(ScopeViolation):
+        scope.require(request.id)
+    with pytest.raises(ScopeViolation):
+        scope.consume(permit)
+    with pytest.raises(ScopeViolation):
+        await scope.admit(request.id, proposal)
+    if later_change == "new_request":
+        scope.begin_request("Open Calculator", source_id="new")
+    else:
+        getattr(scope, later_change)()
+    assert not scope.was_finished(request.id)
+
+
+def test_revocation_cannot_forge_normal_finish_receipt():
+    scope = RequestScope()
+    request = scope.begin_request("Open Notepad", source_id="revoked")
+    scope.revoke("Request closed; await a new human request")
+    assert not scope.was_finished(request.id)
+
+
 @pytest.mark.parametrize("revoke", ["stop", "new", "session", "finish"])
 async def test_revocation_invalidates_queued_and_active_permits(revoke):
     scope = RequestScope(LiteralJudge())
@@ -320,11 +352,9 @@ async def test_malformed_gemini_response_fails_closed(response):
         aio=SimpleNamespace(models=SimpleNamespace(generate_content=generate_content))
     )
     scope = RequestScope(GeminiScopeJudge(client=client))
-    request = scope.begin_request("Open Notepad", source_id="human:1")
+    request = scope.begin_request("Handle that", source_id="human:1")
     with pytest.raises(ScopeViolation):
-        await scope.admit(
-            request.id, ActionProposal("open_app", {"app_name": "Notepad"})
-        )
+        await scope.admit(request.id, ActionProposal("click_mouse", {"x": 12, "y": 34}))
 
 
 async def test_quota_exhausted_triggers_fast_heuristic_fallback():
@@ -342,6 +372,11 @@ async def test_quota_exhausted_triggers_fast_heuristic_fallback():
     )
     scope = RequestScope(GeminiScopeJudge(client=client))
     request = scope.begin_request("Open Notepad", source_id="human:1")
+    # Only unresolved meaning reaches the provider and primes its outage cache.
+    with pytest.raises(ScopeViolation):
+        await scope.admit(
+            request.id, ActionProposal("desktop_press_key", {"key": "enter"})
+        )
     permit = await scope.admit(
         request.id, ActionProposal("open_app", {"app_name": "Notepad"})
     )

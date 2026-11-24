@@ -12,7 +12,7 @@ import type {
 const unavailable =
   "Open IRA in the desktop app to manage your profile and memory.";
 
-/** One authoritative renderer snapshot; drafts stay in the Settings forms. */
+/** One authoritative renderer snapshot; drafts stay in the System Controls forms. */
 export function usePersonalMemory(
   api: PersonalMemoryApi | null | undefined = window.ira?.personalMemory,
 ) {

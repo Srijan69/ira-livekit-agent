@@ -1,8 +1,7 @@
 """The skill file format: parsing, validation and rendering.
 
 Fixtures are inline strings rather than files so each test shows exactly the
-text under test. The approved example from the design is the first fixture,
-verbatim -- if the parser ever disagrees with it, the parser is wrong.
+text under test. The neutral web example exercises metadata, parameterized actions, and prose checks.
 """
 
 from __future__ import annotations
@@ -22,41 +21,41 @@ from skill_format import (
 
 APPROVED_EXAMPLE = """\
 ---
-name: Play Favorite Playlist
-description: Plays one of the boss's Spotify playlists in a browser. Not for single songs or podcasts.
-phrases: put on my music; play my funk songs; start my playlist
+name: Open Reference Page
+description: Opens a requested reference page in a browser. Not for editing or submitting forms.
+phrases: open my reference page; read my reference page; open the details
 version: 2
 source: compiled
 ---
 
 ## Goal
-Music from {playlist} is playing in {browser}, and the boss can hear it.
+The {page} reference is open in {browser}, and the boss can see it.
 
 ## Inputs
-- playlist — which saved playlist to play. Default: "My funk songs".
+- page — which requested page to open. Default: "https://example.test/details".
 - browser — Brave or Chrome. Default: "Brave".
 
 ## Before starting
-- Spotify is already signed in inside IRA's browser profile.
+- The browser can reach the requested site.
 
 ## Steps
-1. **Open the browser** — Spotify needs a window to load in.
+1. **Open the browser** — The reference site needs a window to load in.
    - do: open_app app_name={browser}
    - check: window_title contains {browser} within 8s
    - if stuck: the Start menu can be slow; open it once more.
-2. **Go to Spotify**
-   - do: browse_to url="https://open.spotify.com"
-3. **Let Spotify finish loading** — it takes about ten seconds on first open.
-   - do: wait until page_contains "Your Library" (max 15s)
-4. **Start the playlist**
-   - do: spotify_play_playlist name={playlist}
-   - check: looks like "music is playing"
+2. **Go to the reference site**
+   - do: browse_to url="https://example.test"
+3. **Let the reference site finish loading** — it takes about ten seconds on first open.
+   - do: wait until page_contains "Reference Index" (max 15s)
+4. **Open the details**
+   - do: browse_to url={page}
+   - check: looks like "details are visible"
 
 ## Done when
-Music is audibly playing and the playlist title is visible.
+The requested details and page title are visible.
 
 ## Never
-- Never ask the boss to sign in again unless Spotify shows a login page.
+- Never submit a form without the requested authorization.
 - Never close tabs IRA didn't open.
 """
 
@@ -65,7 +64,7 @@ class TestLifecycleMetadata:
     def test_metadata_round_trips_without_changing_permissions(self) -> None:
         skill = replace(
             parse_skill(APPROVED_EXAMPLE),
-            allowed_tools=("open_app", "browse_to", "spotify_play_playlist"),
+            allowed_tools=("open_app", "browse_to"),
             state="validated",
             pinned=True,
             source_run_id="verified-run-42",
@@ -100,12 +99,12 @@ class TestApprovedExample:
     def test_reads_the_header(self) -> None:
         skill = parse_skill(APPROVED_EXAMPLE)
 
-        assert skill.name == "Play Favorite Playlist"
-        assert skill.description.startswith("Plays one of the boss's Spotify")
+        assert skill.name == "Open Reference Page"
+        assert skill.description.startswith("Opens a requested reference page")
         assert skill.phrases == (
-            "put on my music",
-            "play my funk songs",
-            "start my playlist",
+            "open my reference page",
+            "read my reference page",
+            "open the details",
         )
         assert skill.version == 2
         assert skill.source == "compiled"
@@ -114,24 +113,20 @@ class TestApprovedExample:
         skill = parse_skill(APPROVED_EXAMPLE)
 
         assert skill.goal == (
-            "Music from {playlist} is playing in {browser}, and the boss can hear it."
+            "The {page} reference is open in {browser}, and the boss can see it."
         )
-        assert skill.preconditions == (
-            "Spotify is already signed in inside IRA's browser profile.",
-        )
-        assert skill.done_when == (
-            "Music is audibly playing and the playlist title is visible."
-        )
+        assert skill.preconditions == ("The browser can reach the requested site.",)
+        assert skill.done_when == ("The requested details and page title are visible.")
         assert len(skill.never) == 2
         assert skill.never[1] == "Never close tabs IRA didn't open."
 
     def test_reads_inputs_with_defaults(self) -> None:
         skill = parse_skill(APPROVED_EXAMPLE)
 
-        playlist, browser = skill.inputs
-        assert playlist.name == "playlist"
-        assert playlist.description == "which saved playlist to play."
-        assert playlist.default == "My funk songs"
+        page, browser = skill.inputs
+        assert page.name == "page"
+        assert page.description == "which requested page to open."
+        assert page.default == "https://example.test/details"
         assert browser.default == "Brave"
 
     def test_reads_each_step_purpose_and_why(self) -> None:
@@ -139,11 +134,11 @@ class TestApprovedExample:
 
         assert [step.purpose for step in skill.steps] == [
             "Open the browser",
-            "Go to Spotify",
-            "Let Spotify finish loading",
-            "Start the playlist",
+            "Go to the reference site",
+            "Let the reference site finish loading",
+            "Open the details",
         ]
-        assert skill.steps[0].why == "Spotify needs a window to load in."
+        assert skill.steps[0].why == "The reference site needs a window to load in."
         assert skill.steps[1].why == ""
 
     def test_reads_a_tool_step_with_its_check_and_hint(self) -> None:
@@ -161,21 +156,21 @@ class TestApprovedExample:
         # quote marks through, so open_app typed "Brave" with the quotes.
         step = parse_skill(APPROVED_EXAMPLE).steps[1]
 
-        assert step.action.args == (("url", "https://open.spotify.com"),)
+        assert step.action.args == (("url", "https://example.test"),)
 
     def test_reads_a_wait_until_with_the_max_alias(self) -> None:
         step = parse_skill(APPROVED_EXAMPLE).steps[2]
 
         assert step.action.kind == "wait"
         assert step.action.until == Check(
-            kind="page_contains", value="Your Library", within=15.0
+            kind="page_contains", value="Reference Index", within=15.0
         )
 
     def test_reads_a_looks_like_check(self) -> None:
         step = parse_skill(APPROVED_EXAMPLE).steps[3]
 
         assert step.check == Check(
-            kind="looks_like", value="music is playing", within=None
+            kind="looks_like", value="details are visible", within=None
         )
 
     def test_is_fully_compiled(self) -> None:
@@ -403,7 +398,7 @@ class TestRendering:
     def test_writes_the_canonical_within_spelling(self) -> None:
         rendered = render_skill(parse_skill(APPROVED_EXAMPLE))
 
-        assert 'wait until page_contains "Your Library" within 15s' in rendered
+        assert 'wait until page_contains "Reference Index" within 15s' in rendered
         assert "(max" not in rendered
 
     def test_quotes_values_that_need_it(self) -> None:
@@ -446,37 +441,37 @@ class TestRendering:
         assert skill.compiled is False
 
 
-# The boss's two real workflow files, verbatim, as they exist on disk.
-LEGACY_PLAYLIST = """\
+# Legacy web and error-log fixtures retain the original format grammar.
+LEGACY_WEB_PAGE = """\
 ---
-name: Play Favorite Playlist
-goal: Play the boss's favorite funk songs playlist in Brave browser.
+name: Open Reference Page
+goal: Open the requested reference page in Brave browser.
 version: 1
 worker: lightweight
 linear: true
 requires_screen: false
-allowed_tools: open_app, browse_to, spotify_play_playlist
+allowed_tools: open_app, browse_to
 failure_policy: stop
 ---
 
-# Play Favorite Playlist
+# Open Reference Page
 
-Play the boss's favorite funk songs playlist in Brave browser.
+Open the requested reference page in Brave browser.
 
 ## Steps
 
 1. open_app: app_name="Brave"
-2. browse_to: url="https://open.spotify.com"
-3. spotify_play_playlist: name="My funk songs"
+2. browse_to: url="https://example.test"
+3. browse_to: url="https://example.test/details"
 
 ## Wait
 
-- **Wait for the spotify to load in the browser for around 10sec**
+- **Wait for the reference site to load in the browser for around 10sec**
 
 ## Verification
 
-- Check the Playlist My funk songs in "Your Library" and play it.
-- Confirm music is playing.
+- Check the reference URL https://example.test/details in "Reference Index" and open it.
+- Confirm details are visible.
 """
 
 LEGACY_LOG_ERROR = """\
@@ -499,38 +494,38 @@ Log Error
 
 class TestLegacyConversion:
     def test_recognises_old_files(self) -> None:
-        assert is_legacy(LEGACY_PLAYLIST)
+        assert is_legacy(LEGACY_WEB_PAGE)
         assert is_legacy(LEGACY_LOG_ERROR)
         assert not is_legacy(APPROVED_EXAMPLE)
 
     def test_converts_tool_steps_without_the_quote_bug(self) -> None:
-        skill = convert_legacy(LEGACY_PLAYLIST)
+        skill = convert_legacy(LEGACY_WEB_PAGE)
 
         assert [step.action.args for step in skill.steps] == [
             (("app_name", "Brave"),),
-            (("url", "https://open.spotify.com"),),
-            (("name", "My funk songs"),),
+            (("url", "https://example.test"),),
+            (("url", "https://example.test/details"),),
         ]
         assert skill.compiled is True
 
     def test_keeps_the_meaning_of_every_old_section(self) -> None:
         # Nothing the boss wrote is dropped: the wait note and the
         # verification lines survive for the thinker to act on.
-        skill = convert_legacy(LEGACY_PLAYLIST)
+        skill = convert_legacy(LEGACY_WEB_PAGE)
 
         assert skill.description == (
-            "Play the boss's favorite funk songs playlist in Brave browser."
+            "Open the requested reference page in Brave browser."
         )
-        assert "Confirm music is playing." in skill.done_when
-        assert "Wait for the spotify to load" in skill.notes
+        assert "Confirm details are visible." in skill.done_when
+        assert "Wait for the reference site to load" in skill.notes
 
     def test_marks_the_conversion_as_a_new_compiled_version(self) -> None:
-        skill = convert_legacy(LEGACY_PLAYLIST)
+        skill = convert_legacy(LEGACY_WEB_PAGE)
 
         assert (skill.version, skill.source) == (2, "compiled")
 
     def test_gives_converted_steps_a_readable_purpose(self) -> None:
-        skill = convert_legacy(LEGACY_PLAYLIST)
+        skill = convert_legacy(LEGACY_WEB_PAGE)
 
         assert skill.steps[0].purpose == "Open app Brave"
 
@@ -544,7 +539,7 @@ class TestLegacyConversion:
         ]
         assert skill.compiled is False
 
-    @pytest.mark.parametrize("legacy", [LEGACY_PLAYLIST, LEGACY_LOG_ERROR])
+    @pytest.mark.parametrize("legacy", [LEGACY_WEB_PAGE, LEGACY_LOG_ERROR])
     def test_conversion_produces_a_valid_new_format_file(self, legacy: str) -> None:
         skill = convert_legacy(legacy)
 

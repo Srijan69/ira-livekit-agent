@@ -15,14 +15,14 @@ class MockJudge:
     async def __call__(self, request, action, history):
         self.calls.append((request, action))
         # Allow anything within requested scope or confirmed
-        allowed = "Notepad" in request.text or "Phonk" in request.text
+        allowed = "Notepad" in request.text or "example.test" in request.text
         return AdmissionDecision("allow" if allowed else "deny", "Mock check")
 
 
 class SampleAgent(Agent):
     def __init__(self):
         self.opened_apps = []
-        self.played_playlists = []
+        self.visited_pages = []
         super().__init__(instructions="Sample test agent")
 
     @function_tool
@@ -31,9 +31,9 @@ class SampleAgent(Agent):
         return f"Opened {app_name}"
 
     @function_tool
-    async def spotify_play_playlist(self, context: RunContext, name: str) -> str:
-        self.played_playlists.append(name)
-        return f"Playing {name}"
+    async def browse_to(self, context: RunContext, url: str) -> str:
+        self.visited_pages.append(url)
+        return f"Opened {url}"
 
     @function_tool
     async def view_skill(self, context: RunContext, name: str) -> str:
@@ -70,19 +70,19 @@ async def test_wrapped_tool_parameter_alias_repair():
 
 
 @pytest.mark.asyncio
-async def test_wrapped_tool_spotify_alias_repair():
+async def test_wrapped_tool_browser_alias_repair():
     agent, scope, facade, _judge = setup_agent()
-    request = scope.begin_request("Play My Phonk Songs playlist", source_id="voice:1")
+    request = scope.begin_request("Open https://example.test", source_id="voice:1")
     speech = SpeechHandle.create()
     facade.bind_speech(speech, request)
     ctx = SimpleNamespace(speech_handle=speech)
 
-    # Calling spotify_play_playlist with alias playlist='My Phonk Songs' instead of name='My Phonk Songs'
-    tool = next(t for t in agent.tools if t.info.name == "spotify_play_playlist")
-    result = await tool(ctx, playlist="My Phonk Songs")
+    # Browser address aliases bind to the current request's canonical URL.
+    tool = next(t for t in agent.tools if t.info.name == "browse_to")
+    result = await tool(ctx, link="https://example.test")
 
-    assert result == "Playing My Phonk Songs"
-    assert agent.played_playlists == ["My Phonk Songs"]
+    assert result == "Opened https://example.test"
+    assert agent.visited_pages == ["https://example.test"]
 
 
 @pytest.mark.asyncio
@@ -102,8 +102,8 @@ async def test_unmapped_speech_handle_cannot_adopt_the_latest_request():
 @pytest.mark.asyncio
 async def test_affirmation_does_not_inherit_an_unasked_previous_action():
     scope = RequestScope(MockJudge())
-    r1 = scope.begin_request("Play My Phonk Songs playlist", source_id="voice:1")
-    assert r1.text == "Play My Phonk Songs playlist"
+    r1 = scope.begin_request("Open https://example.test", source_id="voice:1")
+    assert r1.text == "Open https://example.test"
 
     # User says 'yes' in subsequent turn
     r2 = scope.begin_request("yes", source_id="voice:2")

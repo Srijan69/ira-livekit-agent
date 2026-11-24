@@ -27,6 +27,11 @@ const start = (at = 100, patch: Partial<ExecutionEvent> = {}) =>
   trackExecution([], event("DELEGATING", at, patch));
 
 describe("trackExecution", () => {
+  it.each(["inspect_screen", "focus_desktop_window", "click_desktop_element", "press_desktop_key", "browse_to", "stop_actions", "finish_request"])("tracks %s with a safe readable action title", (name) => {
+    const item = start(100, { tool_name: name })[0];
+    expect(item.toolName).toBe(name);
+    expect(item.title).not.toBe("Working on your request");
+  });
   it.each([
     ["ask", "Asking for clarification"],
     ["wait", "Waiting for a condition"],

@@ -23,11 +23,10 @@ sys.path.insert(0, str(ROOT_DIR / "tests"))
 
 import openpyxl  # noqa: E402
 from PIL import Image  # noqa: E402
-from test_browser_multitab import FakeMultiTabDriver, FakeTab  # noqa: E402
 
 import image_pipeline  # noqa: E402
 import market_report  # noqa: E402
-from browser import BrowserController  # noqa: E402
+from tests.fixtures.playwright_fakes import FakePage, controller_with  # noqa: E402
 
 
 def run_evaluation() -> dict[str, Any]:
@@ -204,14 +203,11 @@ def run_evaluation() -> dict[str, Any]:
     print("\n[Evaluating Test 3: Multi-Tab Browser Coordination & Form Filling]")
     t0 = time.time()
     try:
-        t1 = FakeTab(
-            "handle-tab1",
+        t1 = FakePage(
             title="Online Job Application Form",
             url="https://forms.example.org/visa-application",
         )
-        driver = FakeMultiTabDriver(initial_tabs=[t1])
-        browser = BrowserController(browser="chrome", headless=True)
-        browser._driver = driver
+        browser = controller_with(t1)
 
         scorecard["Test 3: Multi-Tab Browser Coordination & Form Filling"][
             "Browser initialized with Tab 1 (application form)"
@@ -221,13 +217,13 @@ def run_evaluation() -> dict[str, Any]:
         browser.new_tab("https://gist.github.com/profile/candidate_details.txt")
         scorecard["Test 3: Multi-Tab Browser Coordination & Form Filling"][
             "Opened Tab 2 with candidate profile document"
-        ] = len(browser.list_tabs()) == 2 and "gist.github.com" in driver.current_url
+        ] = len(browser.list_tabs()) == 2 and "gist.github.com" in browser.current_url
 
         # Flip between tabs
         browser.switch_tab(1)
         scorecard["Test 3: Multi-Tab Browser Coordination & Form Filling"][
             "Flipped back to Tab 1 without losing session state"
-        ] = driver.current_tab.handle == "handle-tab1"
+        ] = browser.list_tabs()[0]["is_active"]
 
         # Simulate copying profile and pasting into form inputs
         candidate_data = {

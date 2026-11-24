@@ -5,6 +5,7 @@ import { IraOrb } from "./IraOrb";
 import { Waveform } from "./Waveform";
 import { ExecutionStatus } from "./ExecutionStatus";
 import type { ExecutionActivity } from "@/lib/execution";
+import type { ComputerUseState } from "@/lib/computerUse";
 import {
   LEFT_CUES,
   RIGHT_CUES,
@@ -77,6 +78,7 @@ export function Stage({
   animate,
   getLevel,
   activities,
+  computerUse,
   now,
   onClearExecution,
 }: {
@@ -85,6 +87,7 @@ export function Stage({
   animate: boolean;
   getLevel: () => number;
   activities: ExecutionActivity[];
+  computerUse?: ComputerUseState;
   now: number;
   onClearExecution: () => void;
 }) {
@@ -114,6 +117,7 @@ export function Stage({
       <div className="execution-stage-layout">
         <ExecutionStatus
           activities={activities}
+          computerUse={computerUse}
           state={state}
           now={now}
           onClear={onClearExecution}

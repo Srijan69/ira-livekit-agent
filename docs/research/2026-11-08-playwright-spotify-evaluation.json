@@ -1,0 +1,42 @@
+{
+  "track": "Aaya Sher",
+  "artist": "Anirudh Ravichander",
+  "tool_result": "Playing 'Aaya Sher' by Anirudh Ravichander, Jangi Reddy, Arjun Chandy, Kasarla Shyam on Spotify in Brave. Playback observed.",
+  "initial_player": {
+    "available": true,
+    "playing": true,
+    "position_seconds": 1,
+    "title": "Aaya Sher",
+    "artists": [
+      "Anirudh Ravichander",
+      "Jangi Reddy",
+      "Arjun Chandy",
+      "Kasarla Shyam"
+    ],
+    "track_path": ""
+  },
+  "progress_first": {
+    "position": "0:01",
+    "duration": "4:46"
+  },
+  "final_player": {
+    "available": true,
+    "playing": true,
+    "position_seconds": 2,
+    "title": "Aaya Sher",
+    "artists": [
+      "Anirudh Ravichander",
+      "Jangi Reddy",
+      "Arjun Chandy",
+      "Kasarla Shyam"
+    ],
+    "track_path": ""
+  },
+  "progress_second": {
+    "position": "0:02",
+    "duration": "4:46"
+  },
+  "status": "verified",
+  "browser": "brave",
+  "elapsed_seconds": 20.01
+}

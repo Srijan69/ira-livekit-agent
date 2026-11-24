@@ -1,83 +1,29 @@
-"""Verified actions drive only isolated Selenium/PyAutoGUI boundary fakes."""
+"""Verified actions drive only isolated Playwright/native desktop boundary fakes."""
 
 import json
 from types import SimpleNamespace
 
 import pytest
 
-from browser import BrowserController
 from desktop import DesktopController
 from skill_adapters import SkillToolAdapters
 from skill_execution import SkillExecutionService
 from skill_format import Action, Check, Skill, SkillInput, Step
 from skill_runs import SkillRunStore
 from telemetry import SessionStatusReporter
+from tests.fixtures.playwright_fakes import FakeElement, FakePage, controller_with
 
 URL = "https://example.test/form"
 
 
-class Element:
+class Element(FakeElement):
     def __init__(self, *, tag="input", displayed=True, enabled=True, **attrs):
-        self.tag_name = tag
-        self.displayed = displayed
-        self.enabled = enabled
-        self.attrs = {"type": "text", "value": "", **attrs}
-        self.actions = []
-        self.ignore_input = False
-        self.stale = False
-
-    def is_displayed(self):
-        if self.stale:
-            raise RuntimeError("stale element")
-        return self.displayed
-
-    def is_enabled(self):
-        return self.enabled
-
-    def get_attribute(self, name):
-        return self.attrs.get(name)
-
-    def get_dom_attribute(self, name):
-        return self.attrs.get(name)
-
-    def get_property(self, name):
-        return self.attrs.get(name)
-
-    def clear(self):
-        self.actions.append("clear")
-        self.attrs["value"] = ""
-
-    def send_keys(self, text):
-        self.actions.append(("type", text))
-        if not self.ignore_input:
-            self.attrs["value"] += text
-
-    def click(self):
-        self.actions.append("click")
-
-
-class Driver:
-    def __init__(self, *elements):
-        self.current_url = URL
-        self.elements = list(elements)
-        self.selectors = []
-        self.on_find = None
-
-    def find_elements(self, by, selector):
-        assert by == "css selector"
-        self.selectors.append(selector)
-        if self.on_find:
-            self.on_find()
-        return list(self.elements)
-
-    def execute_script(self, *args):
-        pytest.fail("Verified actions must not fall back to JavaScript")
+        super().__init__(tag, displayed=displayed, enabled=enabled, **attrs)
+        self.attrs = self._attrs
 
 
 def browser_with(*elements):
-    browser = BrowserController()
-    browser._driver = Driver(*elements)
-    return browser
+    return controller_with(FakePage(list(elements), url=URL))
 
 
 class DesktopBackend:
@@ -114,7 +60,7 @@ def test_selector_click_uses_a_fresh_target_and_ignores_legacy_indices():
     assert current.actions == ["click"]
     assert stale.actions == []
     replacement = Element(tag="button")
-    browser._driver.elements = [replacement]
+    browser._page.elements = [replacement]
     browser.click_selector("#go", URL)
     assert replacement.actions == ["click"]
 
@@ -141,7 +87,7 @@ def test_stale_target_does_not_retry_or_rebind():
 
 def test_intercepted_click_does_not_fall_back_to_javascript():
     class Intercepted(Element):
-        def click(self):
+        def click(self, **kwargs):
             raise RuntimeError("intercepted")
 
     browser = browser_with(Intercepted())
@@ -156,17 +102,17 @@ def test_intercepted_click_does_not_fall_back_to_javascript():
 def test_click_rejects_url_drift_before_finding_targets(actual):
     element = Element()
     browser = browser_with(element)
-    browser._driver.current_url = actual
+    browser._page.url = actual
     with pytest.raises(ValueError, match="URL"):
         browser.click_selector("#go", URL)
-    assert browser._driver.selectors == []
+    assert browser._page.selectors == []
     assert element.actions == []
 
 
 def test_click_canonicalizes_host_default_port_and_fragment():
     element = Element()
     browser = browser_with(element)
-    browser._driver.current_url = "https://EXAMPLE.test:443/#now"
+    browser._page.url = "https://EXAMPLE.test:443/#now"
     browser.click_selector("#go", "https://example.test#before")
     assert element.actions == ["click"]
 
@@ -174,9 +120,7 @@ def test_click_canonicalizes_host_default_port_and_fragment():
 def test_click_rechecks_url_after_resolving_target():
     element = Element()
     browser = browser_with(element)
-    browser._driver.on_find = lambda: setattr(
-        browser._driver, "current_url", URL + "?drift"
-    )
+    browser._page.on_find = lambda: setattr(browser._page, "url", URL + "?drift")
     with pytest.raises(ValueError, match="URL"):
         browser.click_selector("#go", URL)
     assert element.actions == []
@@ -185,7 +129,7 @@ def test_click_rechecks_url_after_resolving_target():
 def test_url_scope_does_not_collapse_browser_distinct_unicode_hostnames():
     element = Element()
     browser = browser_with(element)
-    browser._driver.current_url = "https://fass.test/form"
+    browser._page.url = "https://fass.test/form"
     with pytest.raises(ValueError, match="URL"):
         browser.click_selector("#go", "https://fa\u00df.test/form")
     assert element.actions == []
@@ -198,7 +142,11 @@ def test_browser_type_verifies_value_before_submitting_and_keeps_text_private():
     )
     outcome = adapters.browser_type("#query", "private search", URL, submit=True)
     assert outcome.ok
-    assert element.actions == ["clear", ("type", "private search"), ("type", "\ue006")]
+    assert element.actions == [
+        ("fill", ""),
+        ("fill", "private search"),
+        ("press", "Enter"),
+    ]
     assert "private search" not in str(outcome)
 
 
@@ -208,7 +156,7 @@ def test_browser_type_cannot_submit_when_input_value_does_not_match():
     browser = browser_with(element)
     with pytest.raises(RuntimeError, match="verif") as error:
         browser.type_selector("#query", "private search", URL, submit=True)
-    assert element.actions == ["clear", ("type", "private search")]
+    assert element.actions == [("fill", ""), ("fill", "private search")]
     assert "private search" not in str(error.value)
 
 
@@ -237,13 +185,13 @@ def test_browser_type_rejects_unsafe_fields_without_reading_or_sending_text(attr
 def test_browser_type_rejects_replaced_target_after_typing():
     element, replacement = Element(), Element(value="value")
     browser = browser_with(element)
-    original_send = element.send_keys
+    original_send = element.fill
 
-    def replace_on_type(text):
+    def replace_on_type(text, **kwargs):
         original_send(text)
-        browser._driver.elements = [replacement]
+        browser._page.elements = [replacement]
 
-    element.send_keys = replace_on_type
+    element.fill = replace_on_type
     with pytest.raises(RuntimeError):
         browser.type_selector("#field", "value", URL, submit=True)
     assert replacement.actions == []
@@ -253,20 +201,20 @@ def test_browser_type_rejects_replaced_target_after_typing():
 def test_browser_type_resolves_same_unique_target_after_clearing(new_matches):
     element, other = Element(), Element()
     browser = browser_with(element)
-    original_clear = element.clear
+    original_clear = element.fill
 
-    def change_matches_on_clear():
-        original_clear()
-        browser._driver.elements = {
+    def change_matches_on_clear(text, **kwargs):
+        original_clear(text, **kwargs)
+        browser._page.elements = {
             "replacement": [other],
             "ambiguous": [element, other],
             "missing": [],
         }[new_matches]
 
-    element.clear = change_matches_on_clear
+    element.fill = change_matches_on_clear
     with pytest.raises(RuntimeError):
         browser.type_selector("#field", "private text", URL, submit=True)
-    assert element.actions == ["clear"]
+    assert element.actions == [("fill", "")]
     assert other.actions == []
 
 
@@ -352,7 +300,12 @@ def test_desktop_typing_and_keys_require_focus_and_keep_text_private():
         adapters.desktop_type("no", "Notes")
     with pytest.raises(ValueError, match="foreground"):
         adapters.desktop_press_key("enter", "Notes")
-    assert backend.actions == [("write", "private text", 0.0), ("press", "enter")]
+    assert (
+        "".join(action[1] for action in backend.actions if action[0] == "write")
+        == "private text"
+    )
+    assert all(action[2] == 0.0 for action in backend.actions if action[0] == "write")
+    assert backend.actions[-1] == ("press", "enter")
 
 
 def test_active_window_observation_requires_exact_casefold_title():
@@ -388,7 +341,7 @@ def test_active_window_observation_requires_exact_casefold_title():
             {"x": 10, "y": 10, "window_title": "Notes", "button": "back"},
         ),
         ("desktop_type", {"text": "line\nnext", "window_title": "Notes"}),
-        ("desktop_type", {"text": "unicode \u20b9", "window_title": "Notes"}),
+        ("desktop_type", {"text": "invalid \ud800", "window_title": "Notes"}),
         ("desktop_type", {"text": "x" * 4001, "window_title": "Notes"}),
         ("desktop_press_key", {"key": "ctrl+v", "window_title": "Notes"}),
         ("desktop_press_key", {"key": "enter", "window_title": ""}),
@@ -510,7 +463,7 @@ async def test_late_invalid_page_selector_rejects_before_effects_or_question(
             )
             assert result.status == "error"
         assert element.actions == []
-        assert browser._driver.selectors == []
+        assert browser._page.selectors == []
     finally:
         await service.aclose()
 

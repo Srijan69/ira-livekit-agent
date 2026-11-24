@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import contextvars
 import json
+import re
 import sqlite3
 import time
 from collections.abc import Iterator
@@ -16,6 +18,7 @@ DEFAULT_RUN_PATH = (
     Path(__file__).resolve().parent.parent / "workflows" / ".runs.sqlite3"
 )
 TERMINAL_STATUSES = frozenset({"done", "error", "cancelled", "uncertain"})
+_task_decision = contextvars.ContextVar("skill_run_decision", default=None)
 
 
 class SkillRunStore:
@@ -31,6 +34,7 @@ class SkillRunStore:
     ) -> None:
         self.path = Path(path) if path is not None else DEFAULT_RUN_PATH
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        self._private_inputs = {}
         with self._connect() as connection:
             connection.execute("PRAGMA journal_mode=WAL")
             connection.execute(
@@ -52,6 +56,24 @@ class SkillRunStore:
 
     def create(self, record: dict[str, Any]) -> bool:
         """Claim a delivery ID atomically; a duplicate may never execute."""
+        record = dict(record)
+        decision = _task_decision.get()
+        if decision is not None:
+            record.update(
+                mode="compiled",
+                request_id=decision.request_id,
+                document_digest=decision.document_digest,
+                decision_digest=decision.digest,
+                decision=decision.record(),
+                input_names=[item.name for item in decision.inputs],
+                input_provenance={item.name: item.source for item in decision.inputs},
+                current_goal=decision.task_kind,
+                selection_reason=decision.reason,
+            )
+            self._private_inputs[record["run_id"]] = tuple(
+                str(item.value) for item in decision.inputs if item.source != "default"
+            )
+        record = self._redact(record["run_id"], record)
         with self._connect() as connection:
             cursor = connection.execute(
                 "INSERT OR IGNORE INTO skill_runs VALUES (?, ?, ?, ?)",
@@ -63,6 +85,29 @@ class SkillRunStore:
                 ),
             )
             return cursor.rowcount == 1
+
+    @contextmanager
+    def bind_task(self, decision):
+        """Carry active task provenance through the existing execution service."""
+        token = _task_decision.set(decision)
+        try:
+            yield
+        finally:
+            _task_decision.reset(token)
+
+    def _redact(self, run_id, value):
+        if isinstance(value, str):
+            for private in sorted(
+                self._private_inputs.get(run_id, ()), key=len, reverse=True
+            ):
+                if private:
+                    value = re.sub(re.escape(private), "[redacted]", value, flags=re.I)
+            return value
+        if isinstance(value, dict):
+            return {key: self._redact(run_id, item) for key, item in value.items()}
+        if isinstance(value, (list, tuple)):
+            return [self._redact(run_id, item) for item in value]
+        return value
 
     def get(self, run_id: str) -> dict[str, Any] | None:
         with self._connect() as connection:
@@ -100,11 +145,18 @@ class SkillRunStore:
                 "skill_version",
                 "skill_markdown",
                 "started_at",
+                "request_id",
+                "document_digest",
+                "decision_digest",
+                "decision",
+                "input_names",
+                "input_provenance",
             ):
                 fields.pop(key, None)
-            record.update(fields)
+            record.update(self._redact(run_id, fields))
             if record["status"] in TERMINAL_STATUSES:
                 record.update(question="", question_id="", input_name="")
+                self._private_inputs.pop(run_id, None)
             connection.execute(
                 "UPDATE skill_runs SET status = ?, record = ? WHERE run_id = ?",
                 (record["status"], json.dumps(record, ensure_ascii=False), run_id),
@@ -126,7 +178,7 @@ class SkillRunStore:
             steps[:] = [
                 item for item in steps if item["step_index"] != step["step_index"]
             ]
-            steps.append(step)
+            steps.append(self._redact(run_id, step))
             connection.execute(
                 "UPDATE skill_runs SET record = ? WHERE run_id = ?",
                 (json.dumps(record, ensure_ascii=False), run_id),

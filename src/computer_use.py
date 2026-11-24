@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import io
 import logging
 import time
@@ -17,6 +18,7 @@ from desktop import (
     ScreenCapture,
     desktop_coordinate_context,
     validate_click_count,
+    validate_desktop_key,
     validate_desktop_text,
     validate_drag_duration,
     validate_mouse_button,
@@ -45,6 +47,7 @@ class DesktopTarget:
     name: str
     role: str
     bounds: tuple[int, int, int, int]
+    has_keyboard_focus: bool = False
 
 
 @dataclass(frozen=True)
@@ -68,6 +71,7 @@ class DesktopFrame:
     targets: tuple[DesktopTarget, ...] = ()
     windows: tuple[DesktopWindow, ...] = ()
     cursor: tuple[int, int] | None = None
+    keyboard_focus: int | str | None = None
 
 
 class ObservedDesktop:
@@ -95,6 +99,34 @@ class ObservedDesktop:
 
     def _window(self) -> WindowStamp | None:
         return self._stamp(self.desktop._active_window())
+
+    @staticmethod
+    def _element_stamp(elements):
+        return sorted(
+            (
+                e["identity"],
+                e["name"],
+                e["role"],
+                tuple(e["bounds"]),
+                bool(e.get("has_keyboard_focus", False)),
+            )
+            for e in elements
+        )
+
+    def _require_typing_focus(self, frame):
+        elements = self.desktop.accessible_elements(self.desktop._active_window())
+        expected = sorted(
+            (t.identity, t.name, t.role, t.bounds)
+            for t in frame.targets
+            if t.has_keyboard_focus
+        )
+        current = sorted(
+            (e["identity"], e["name"], e["role"], tuple(e["bounds"]))
+            for e in elements
+            if e.get("has_keyboard_focus", False)
+        )
+        if current != expected:
+            raise ValueError("The focused control changed; call capture_screen again.")
 
     def _visible_windows(self):
         enumerate_windows = getattr(self.desktop._backend, "getAllWindows", None)
@@ -135,6 +167,7 @@ class ObservedDesktop:
         self.invalidate()
         with desktop_coordinate_context():
             window = self._window()
+            keyboard_focus = self.desktop.keyboard_focus()
             layout = self.desktop.layout()
             screen_size = layout.bounds[2:]
             elements = (
@@ -144,11 +177,21 @@ class ObservedDesktop:
             )
             capture = self.desktop.capture_screen()
             self._remember_capture(capture)
+            fresh_elements = (
+                self.desktop.accessible_elements(self.desktop._active_window())
+                if window
+                else []
+            )
             windows = tuple(
                 DesktopWindow(uuid.uuid4().hex[:12], self._stamp(w))
                 for w in self._visible_windows()
             )
-            if self._window() != window or self.desktop.layout() != layout:
+            if (
+                self._window() != window
+                or self.desktop.layout() != layout
+                or self.desktop.keyboard_focus() != keyboard_focus
+                or self._element_stamp(elements) != self._element_stamp(fresh_elements)
+            ):
                 raise DesktopChangedDuringCaptureError(
                     "Desktop changed during capture; call capture_screen again."
                 )
@@ -186,11 +229,13 @@ class ObservedDesktop:
                         e["name"],
                         e["role"],
                         tuple(e["bounds"]),
+                        bool(e.get("has_keyboard_focus", False)),
                     )
                     for e in elements
                 ),
                 windows,
                 cursor,
+                keyboard_focus,
             )
             self._frame = frame
             logger.info(
@@ -204,7 +249,14 @@ class ObservedDesktop:
             )
             return frame
 
-    def _guard(self, frame: DesktopFrame, points=(), *, require_window=True) -> None:
+    def _guard(
+        self,
+        frame: DesktopFrame,
+        points=(),
+        *,
+        require_window=True,
+        require_keyboard_focus=False,
+    ) -> None:
         current = self._window()
         layout = self.desktop.layout()
         size = layout.bounds[2:]
@@ -235,6 +287,11 @@ class ObservedDesktop:
             raise ValueError(
                 "The foreground window or display changed; call capture_screen again."
             )
+        if (
+            require_keyboard_focus
+            and self.desktop.keyboard_focus() != frame.keyboard_focus
+        ):
+            raise ValueError("The keyboard focus changed; call capture_screen again.")
         window = (
             self.desktop._require_foreground(
                 frame.window.title, identity=frame.window.identity
@@ -313,7 +370,10 @@ class ObservedDesktop:
                 rgba_bytes=view.tobytes(),
                 source_bounds=(left, top, right - left, bottom - top),
                 targets=tuple(
-                    replace(t, id=uuid.uuid4().hex[:12]) for t in frame.targets
+                    replace(t, id=uuid.uuid4().hex[:12])
+                    for t in frame.targets
+                    if left <= t.bounds[0] + t.bounds[2] // 2 < right
+                    and top <= t.bounds[1] + t.bounds[3] // 2 < bottom
                 ),
                 windows=tuple(
                     replace(w, id=uuid.uuid4().hex[:12]) for w in frame.windows
@@ -322,7 +382,9 @@ class ObservedDesktop:
             self._frame = result
             return result
 
-    def focus(self, observation_id, window_id, *, _permit_check=lambda: None):
+    def focus(
+        self, observation_id, window_id, *, _permit_check=lambda: None, _on_action=None
+    ):
         frame = self._require_frame(observation_id)
         self.invalidate()
         with desktop_coordinate_context():
@@ -337,8 +399,32 @@ class ObservedDesktop:
                 raise ValueError("The window target changed; call capture_screen.")
             _permit_check()
             self._guard(frame, require_window=False)
-            matches[0].activate()
-            result = self._observe_after_input()
+            self._notify_action(
+                _on_action,
+                frame,
+                {
+                    "action": "focus",
+                    "observation_id": frame.id,
+                    "image_points": [],
+                    "window": {
+                        "id": target.id,
+                        "title": target.window.title,
+                        "image_bounds": self.image_bounds(frame, target.window.bounds),
+                    },
+                },
+            )
+            _permit_check()
+            self._guard(frame, require_window=False)
+            with self.indicator((), "focus"):
+                _permit_check()
+                self._guard(frame, require_window=False)
+                if self._stamp(matches[0]) != target.window:
+                    raise ValueError("The window target changed; call capture_screen.")
+                self.desktop.input_guard()
+                matches[0].activate()
+            result = self._observe_after_input(
+                expected_window_id=target.window.identity, _permit_check=_permit_check
+            )
             if (
                 result.window is None
                 or result.window.identity != target.window.identity
@@ -375,6 +461,7 @@ class ObservedDesktop:
                 ]
         result = {
             "observation_id": frame.id,
+            "captured_at": frame.capture.captured_at,
             "coordinate_space": "image_pixels",
             "image_size": [frame.width, frame.height],
             "desktop_size": list(frame.screen_size),
@@ -410,12 +497,41 @@ class ObservedDesktop:
             ],
         }
         if include_image:
-            buffer = io.BytesIO()
-            Image.frombytes(
+            canvas = Image.frombytes(
                 "RGBA", (frame.width, frame.height), frame.rgba_bytes
-            ).convert("RGB").save(buffer, "JPEG", quality=85)
-            result.update(image_bytes=buffer.getvalue(), image_mime_type="image/jpeg")
+            ).convert("RGB")
+            for quality in (75, 60, 45, 30, 20):
+                buffer = io.BytesIO()
+                canvas.save(buffer, "JPEG", quality=quality, optimize=True)
+                image_bytes = buffer.getvalue()
+                if len(image_bytes) <= 300_000:
+                    break
+            result.update(
+                image_bytes=image_bytes,
+                image_mime_type="image/jpeg",
+                screenshot_data_url="data:image/jpeg;base64,"
+                + base64.b64encode(image_bytes).decode("ascii"),
+            )
         return result
+
+    @staticmethod
+    def _notify_action(callback, frame, descriptor):
+        if callback is not None:
+            try:
+                callback(frame, descriptor)
+            except Exception:
+                logger.warning(
+                    "Desktop action preview could not be published", exc_info=True
+                )
+
+    @staticmethod
+    def _image_point(frame, point):
+        sx, sy, sw, sh = frame.source_bounds
+        x, y = point
+        return [
+            int((x - sx + 0.5) * frame.width / sw),
+            int((y - sy + 0.5) * frame.height / sh),
+        ]
 
     def _require_target(self, target: DesktopTarget) -> None:
         current = self.desktop.accessible_elements(self.desktop._active_window())
@@ -430,9 +546,24 @@ class ObservedDesktop:
         if len(matches) != 1:
             raise ValueError("The named control changed; call capture_screen again.")
 
-    def _observe_after_input(self) -> DesktopFrame:
+    def _observe_after_input(
+        self, *, expected_window_id=None, _permit_check=lambda: None
+    ) -> DesktopFrame:
+        if expected_window_id is not None:
+            deadline = time.monotonic() + 1
+            while True:
+                _permit_check()
+                window = self._window()
+                if window is not None and window.identity == expected_window_id:
+                    break
+                if time.monotonic() >= deadline:
+                    raise RuntimeError(
+                        "Window focus was requested but not verified; capture_screen again."
+                    )
+                time.sleep(0.025)
         for attempt in range(3):
             try:
+                _permit_check()
                 return self.observe()
             except DesktopChangedDuringCaptureError:
                 if attempt == 2:
@@ -441,13 +572,24 @@ class ObservedDesktop:
         raise AssertionError("unreachable")
 
     def act(
-        self, observation_id: str, action: str, *, _permit_check=lambda: None, **args
+        self,
+        observation_id: str,
+        action: str,
+        *,
+        _permit_check=lambda: None,
+        _on_action=None,
+        **args,
     ) -> DesktopFrame:
         frame = self._require_frame(observation_id)
+        requested_action = action
         self.invalidate()
         with desktop_coordinate_context():
             _permit_check()
-            self._guard(frame, require_window=action != "move")
+            self._guard(
+                frame,
+                require_window=action != "move",
+                require_keyboard_focus=action in {"type", "key"},
+            )
             if action == "click":
                 validate_mouse_button(args.get("button", "left"))
                 validate_click_count(args.get("clicks", 1))
@@ -458,6 +600,10 @@ class ObservedDesktop:
                 validate_drag_duration(args.get("duration", 0.5))
             elif action == "type":
                 validate_desktop_text(args.get("text"))
+                self._require_typing_focus(frame)
+            elif action == "key":
+                validate_desktop_key(args.get("key"))
+                self._require_typing_focus(frame)
             points = ()
             target = None
             if action == "click_target":
@@ -478,13 +624,32 @@ class ObservedDesktop:
                     self._point(frame, args.pop("start_x"), args.pop("start_y")),
                     self._point(frame, args.pop("end_x"), args.pop("end_y")),
                 )
-            elif action != "type":
+            elif action not in {"type", "key"}:
                 raise ValueError("Unsupported desktop action.")
 
             def guard():
                 _permit_check()
-                self._guard(frame, points, require_window=action != "move")
+                self._guard(
+                    frame,
+                    points,
+                    require_window=action != "move",
+                    require_keyboard_focus=action in {"type", "key"},
+                )
 
+            guard()
+            descriptor = {
+                "action": requested_action,
+                "observation_id": frame.id,
+                "image_points": [self._image_point(frame, p) for p in points],
+            }
+            if target is not None:
+                descriptor["target"] = {
+                    "id": target.id,
+                    "name": target.name,
+                    "role": target.role,
+                    "image_bounds": self.image_bounds(frame, target.bounds),
+                }
+            self._notify_action(_on_action, frame, descriptor)
             guard()
             logger.info(
                 "desktop input mapped",
@@ -497,6 +662,8 @@ class ObservedDesktop:
             with self.indicator(points, action):
                 if target is not None:
                     self._require_target(target)
+                if action in {"type", "key"}:
+                    self._require_typing_focus(frame)
                 guard()
                 if action == "click":
                     self.desktop.click(*points[0], **args)
@@ -513,8 +680,26 @@ class ObservedDesktop:
                         **args,
                         _guard=guard,
                     )
+                elif action == "key":
+                    self.desktop.press_in_window(
+                        args["key"], frame.window.title, _guard=guard
+                    )
                 else:
-                    self.desktop.type_in_window(args["text"], frame.window.title)
+                    self.desktop.type_in_window(
+                        args["text"],
+                        frame.window.title,
+                        _guard=guard,
+                        _focused_targets=[
+                            {
+                                "identity": target.identity,
+                                "role": target.role,
+                                "bounds": target.bounds,
+                                "has_keyboard_focus": True,
+                            }
+                            for target in frame.targets
+                            if target.has_keyboard_focus
+                        ],
+                    )
             if (
                 action in {"move", "drag"}
                 and self.desktop.pointer_position() != points[-1]
@@ -523,7 +708,7 @@ class ObservedDesktop:
                     "Requested pointer destination was not observed; call capture_screen."
                 )
             try:
-                return self._observe_after_input()
+                return self._observe_after_input(_permit_check=_permit_check)
             except Exception as exc:
                 raise RuntimeError(
                     "Input was sent but the result is not verified: capture_screen is required."

@@ -74,6 +74,38 @@ def test_sqlite_handles_are_closed_after_operations(tmp_path, monkeypatch):
             connection.execute("SELECT 1")
 
 
+def test_bound_task_redacts_private_values_and_freezes_task_identity(tmp_path):
+    from task_routing import BoundInput, TaskDecision
+
+    store = SkillRunStore(tmp_path / "runs.db")
+    decision = TaskDecision(
+        "task-one",
+        "fill_field",
+        "workflow",
+        "Explicit task",
+        selected_id="workflow:notes",
+        document_digest="a" * 64,
+        inputs=(BoundInput("message", "private human content", "request"),),
+    )
+    with store.bind_task(decision):
+        store.create(record("bound"))
+        store.record_step(
+            "bound",
+            {
+                "step_index": 1,
+                "evidence": "typed private human content",
+                "input_names": ["message"],
+            },
+        )
+        store.update("bound", request_id="other", message="private human content")
+    saved = store.get("bound")
+    assert saved["request_id"] == "task-one"
+    assert saved["document_digest"] == "a" * 64
+    assert saved["input_provenance"] == {"message": "request"}
+    assert saved["steps"][0]["evidence"] == "typed [redacted]"
+    assert "private human content" not in str(saved)
+
+
 @pytest.mark.parametrize("recovery", [False, True])
 def test_terminal_transition_clears_pending_question_and_cannot_reopen_it(
     tmp_path, recovery

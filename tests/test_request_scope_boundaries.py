@@ -208,9 +208,15 @@ async def test_quota_cannot_expand_or_invent_the_requested_effect(text, action):
     with pytest.raises(ToolError) as error:
         await scope.admit(request.id, action)
     payload = json.loads(str(error.value))
-    assert payload["status"] == "policy_unavailable"
-    assert payload["retryable"] is True
+    # Explicit prohibition is settled before semantic provider availability.
+    if text == "Do not open Notepad":
+        assert payload["status"] == "scope_rejected"
+        assert payload["retryable"] is False
+    else:
+        assert payload["status"] == "policy_unavailable"
+        assert payload["retryable"] is True
     assert "confirm" not in payload["instruction"].lower()
+    assert scope.history == ()
 
 
 @pytest.mark.parametrize(
@@ -247,12 +253,12 @@ async def test_policy_fallback_attempts_fit_the_overall_deadline():
         client=unavailable_client(stalled), model="gemini-3.5-flash-lite", timeout=0.3
     )
     scope = RequestScope(judge, policy_timeout=0.6)
-    request = scope.begin_request("Open Notepad", source_id="human:1")
-    permit = await asyncio.wait_for(
-        scope.admit(request.id, ActionProposal("open_app", {"app_name": "Notepad"})),
-        1.0,
-    )
-    scope.consume(permit)
+    request = scope.begin_request("Handle that", source_id="human:1")
+    with pytest.raises(ToolError):
+        await asyncio.wait_for(
+            scope.admit(request.id, ActionProposal("click_mouse", {"x": 12, "y": 34})),
+            1.0,
+        )
     assert len(attempts) == 4
 
 

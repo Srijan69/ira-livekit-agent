@@ -46,6 +46,11 @@ def test_profile_roundtrip_and_blank_clear_survive_reopen(store, tmp_path):
         "age": None,
         "occupation": "",
         "preferences": "",
+        "location": "",
+        "languages": "",
+        "interests": "",
+        "goals": "",
+        "about_me": "",
         "revision": 0,
         "updated_at": None,
     }
@@ -135,8 +140,8 @@ def test_competing_process_style_profile_edits_use_transactional_compare_and_swa
 def test_settings_persist_and_disable_context_recall(store, tmp_path):
     assert store.get_settings() == {
         "enabled": True,
-        "context_budget": 16000,
-        "summary_trigger": 12000,
+        "context_budget": 20000,
+        "summary_trigger": 16000,
         "recent_turns": 12,
         "summarizer_model": "gemini-3.8-flash",
         "revision": 0,
@@ -164,7 +169,7 @@ def test_settings_persist_and_disable_context_recall(store, tmp_path):
         {"context_budget": 128001},
         {"context_budget": True},
         {"summary_trigger": 1023},
-        {"summary_trigger": 15000},
+        {"summary_trigger": 19000},
         {"recent_turns": 3},
         {"recent_turns": 41},
         {"summarizer_model": ""},
@@ -509,7 +514,7 @@ def test_live_status_is_json_and_survives_recovery_as_collecting(store, tmp_path
     )
     status = store.get_status()
     assert status["status"]["state"] == "summarizing"
-    assert status["settings"]["context_budget"] == 16000
+    assert status["settings"]["context_budget"] == 20000
     assert status["memory_revision"] == 0
     assert status["checkpoint"] is None
     json.dumps(status)

@@ -8,6 +8,12 @@ metadata:
   hermes:
     category: web
     tags: [web, forms, input, browser]
+  ira:
+    task_kinds: ["fill_field"]
+    allowed_tools: ["browse_to", "list_page_elements", "type_into_element", "read_page"]
+    allowed_effects: ["navigate", "type", "read"]
+    done_when: ["field_value_observed"]
+    inputs: {"url": {"required": true, "type": "string"}, "text": {"required": true, "type": "string"}}
 ---
 
 # Fill Web Field Skill

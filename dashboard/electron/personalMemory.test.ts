@@ -3,6 +3,22 @@ import { describe, expect, it } from "vitest";
 import { createPersonalMemoryProxy } from "./personalMemory";
 
 describe("personal memory bridge proxy", () => {
+  it("persists expanded profile details without dropping multiline background", async () => {
+    let saved: Record<string, unknown> = {};
+    const proxy = createPersonalMemoryProxy(async (_path, init) => {
+      if (init?.method === "PATCH") saved = JSON.parse(String(init.body));
+      return new Response(JSON.stringify({ ...saved, revision: 1 }));
+    });
+    const input = { name: "Alex", age: null, occupation: "Engineer", preferences: "Concise replies", location: "Hyderabad", languages: "English, Telugu", interests: "Astronomy", goals: "Build a telescope", about_me: "I enjoy learning.\nI work on weekends.", expected_revision: 0 };
+    await proxy.saveProfile(input);
+    expect(await proxy.profile()).toMatchObject(input);
+    expect(await proxy.saveProfile({ ...input, about_me: "x".repeat(4001) })).toHaveProperty("error");
+    expect(await proxy.saveProfile({ ...input, interests: "x".repeat(1501) })).toHaveProperty("error");
+    expect(await proxy.saveProfile({ ...input, location: "x".repeat(201) })).toHaveProperty("error");
+    expect(await proxy.saveProfile({ ...input, goals: "bad\u0000text" })).toHaveProperty("error");
+    expect(await proxy.saveProfile({ ...input, goals: "bad\u0085text" })).toHaveProperty("error");
+    expect(await proxy.profile()).toMatchObject(input);
+  });
   it("uses fixed profile routes with revisions and notifies only after success", async () => {
     const calls: Array<{path: string; init?: RequestInit}> = [];
     let notifications = 0;

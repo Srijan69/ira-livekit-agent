@@ -13,9 +13,7 @@ from unittest.mock import MagicMock
 
 import openpyxl
 from PIL import Image
-from test_browser_multitab import FakeMultiTabDriver, FakeTab
 
-from browser import BrowserController
 from image_pipeline import run_image_pipeline
 from market_report import (
     compose_market_summary,
@@ -25,6 +23,7 @@ from market_report import (
     scrape_trending_assets,
     validate_three_sentences,
 )
+from tests.fixtures.playwright_fakes import FakePage, controller_with
 
 FIXTURES_DIR = Path(__file__).resolve().parent / "fixtures"
 
@@ -163,14 +162,11 @@ class TestMultiTabCoordinationEvaluation:
 
     def test_multi_tab_creation_and_switching(self):
         """Criterion 3.1: new_tab, switch_tab, and list_tabs work seamlessly."""
-        t1 = FakeTab(
-            "h-1",
+        t1 = FakePage(
             title="Online Job Application Form",
             url="https://forms.example.org/apply",
         )
-        fake_driver = FakeMultiTabDriver(initial_tabs=[t1])
-        browser = BrowserController(browser="chrome")
-        browser._driver = fake_driver
+        browser = controller_with(t1)
 
         # Tab 1: Form application
         tabs_initial = browser.list_tabs()
@@ -185,7 +181,7 @@ class TestMultiTabCoordinationEvaluation:
         # Verify active tab is Tab 2
         active_tab = next(t for t in browser.list_tabs() if t["is_active"])
         assert active_tab["index"] == 2
-        assert "gist.github.com" in fake_driver.current_url
+        assert "gist.github.com" in browser.current_url
 
         # Switch back to Tab 1
         browser.switch_tab(1)

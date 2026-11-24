@@ -1,9 +1,11 @@
 import asyncio
+from threading import Event
 
 import pytest
 
 from context_memory import ContextApplyDeferred, ContextMemoryController
-from personal_memory import PersonalMemoryStore
+from context_summary import estimate_tokens
+from personal_memory import PersonalMemoryStore, profile_context
 
 
 def summary(items, previous=None):
@@ -49,12 +51,21 @@ class BackgroundSummary:
 @pytest.fixture
 def store(tmp_path):
     instance = PersonalMemoryStore(tmp_path / "memory.db")
-    instance.save_settings({"recent_turns": 4})
+    instance.save_settings(
+        {"recent_turns": 4, "context_budget": 16000, "summary_trigger": 12000}
+    )
     yield instance
     instance.close()
 
 
-def controller_for(store, summarizer=None, *, idle=lambda: True, base_tokens=0):
+def controller_for(
+    store,
+    summarizer=None,
+    *,
+    idle=lambda: True,
+    base_tokens=0,
+    estimate_context_tokens=None,
+):
     applied = []
     invalidated = []
 
@@ -77,6 +88,7 @@ def controller_for(store, summarizer=None, *, idle=lambda: True, base_tokens=0):
         is_idle=idle,
         invalidate=lambda: invalidated.append(True),
         base_tokens=base_tokens,
+        estimate_context_tokens=estimate_context_tokens,
         retry_delay_seconds=0,
         flush_timeout_seconds=0.1,
     )
@@ -128,6 +140,70 @@ async def test_threshold_single_flight_and_arrivals_survive_durable_compaction(s
     await controller.tick()
     assert len(summarizer.calls) == 1  # stale provider count cannot retrigger.
     await controller.aclose()
+
+
+async def test_escaped_profile_context_can_compact_without_discarding_saved_details(
+    store,
+):
+    store.save_settings({"context_budget": 20000, "summary_trigger": 16000})
+    fields = {
+        "name": "\\" * 120,
+        "occupation": "\\" * 200,
+        "preferences": "\\" * 4000,
+        "location": "\\" * 200,
+        "languages": "\\" * 200,
+        "interests": "\\" * 1500,
+        "goals": "\\" * 1500,
+        "about_me": "\\" * 4000,
+    }
+    store.save_profile(fields)
+    controller, applied, _ = controller_for(store, base_tokens=10500)
+    try:
+        await add_turns(controller, 8, size=60)
+        await controller.tick(force=True)
+        await settle(controller)
+        assert applied
+        assert applied[-1][2]["about_me"] == "\\" * 4000
+        assert store.get_profile()["about_me"] == "\\" * 4000
+        assert controller.status()["state"] in {"ready", "restored"}
+    finally:
+        await controller.aclose()
+
+
+async def test_arrival_during_context_estimation_is_included_before_pending_clear(
+    store,
+):
+    estimating, release = Event(), Event()
+    calls = 0
+
+    def estimate(summary, tail, profile):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            estimating.set()
+            assert release.wait(5)
+        return (
+            estimate_tokens(profile_context(profile))
+            + estimate_tokens(summary)
+            + estimate_tokens(tail)
+        )
+
+    controller, applied, _ = controller_for(store, estimate_context_tokens=estimate)
+    try:
+        await add_turns(controller, 8)
+        await controller.tick(force=True)
+        driving = asyncio.create_task(settle(controller))
+        assert await asyncio.to_thread(estimating.wait, 5)
+        await controller.record(
+            "late-human", "user", "New project detail", trusted=True
+        )
+        release.set()
+        await driving
+        assert any(row["item_id"] == "late-human" for row in applied[-1][1])
+        assert store.journal("session")[-1]["item_id"] == "late-human"
+    finally:
+        release.set()
+        await controller.aclose()
 
 
 async def test_conservative_growth_after_latest_metric_triggers_without_new_metric(

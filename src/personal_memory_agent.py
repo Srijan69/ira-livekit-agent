@@ -9,21 +9,31 @@ import sqlite3
 from threading import RLock
 
 from dual_memory import find_unique_match, normalize_for_match, scan_threats
-from personal_memory import SUMMARY_SECTIONS, MemoryConflict
+from personal_memory import (
+    SUMMARY_SECTIONS,
+    MemoryConflict,
+    bounded_context_text,
+    profile_context,
+)
 
 _PROFILE_LABELS = {
     "name": "Name",
     "age": "Age",
     "occupation": "Occupation",
     "preferences": "Preferences",
+    "location": "Location",
+    "languages": "Languages",
+    "interests": "Interests",
+    "goals": "Goals",
+    "about_me": "About me",
 }
 _IDENTITY_CLAIMS = re.compile(
-    r"(?:^|[\n;])\s*(?:name|age|occupation|preferences)\s*:"
-    r"|\b(?:my|your|the user(?:'s)?|user(?:'s)?|boss(?:'s)?)\s+(?:name|age|occupation|preferences)\b"
+    r"(?:^|[\n;])\s*(?:name|age|occupation|preferences|location|languages|interests|goals|about[ _]me)\s*:"
+    r"|\b(?:my|your|the user(?:'s)?|user(?:'s)?|boss(?:'s)?)\s+(?:name|age|occupation|preferences|location|languages|interests|goals|about[ _]me|bio)\b"
     r"|\b(?:user|boss)\s+(?:is named|is called|works as|is \d{1,3}(?: years old)?)\b"
     r"|\b(?:user|boss)\s+(?:is an?\s+\w+|prefers?|likes?|dislikes?)\b"
     r"|\b(?:i am|i'm|i\u2019m)\s+\d{1,3}(?:\s+years?\s+old)?\b"
-    r"|\b(?:i work as|i prefer|i like|i dislike|my favorite|my favourite)\b"
+    r"|\b(?:i work as|i live in|i speak|i prefer|i like|i dislike|my favorite|my favourite)\b"
     r"|^\s*(?:prefers?|likes?|dislikes?|favorite|favourite|preferences?)\b",
     re.IGNORECASE,
 )
@@ -86,6 +96,17 @@ def _profile_patch(text):
         r"\b(?:and|but|because|unless|if|then)\b", occupation[1], re.IGNORECASE
     ):
         return {"occupation": occupation[1]}
+    explicit_fields = {
+        "location": r"(?:my location is|i live in)\s+(.+)",
+        "languages": r"(?:my languages? (?:is|are)|i speak)\s+(.+)",
+        "interests": r"my interests? (?:is|are)\s+(.+)",
+        "goals": r"my goals? (?:is|are)\s+(.+)",
+        "about_me": r"(?:about me:\s*|my bio is\s+)(.+)",
+    }
+    for field, pattern in explicit_fields.items():
+        matched = re.fullmatch(pattern, text, re.IGNORECASE)
+        if matched:
+            return {field: matched[1]}
     if re.fullmatch(
         r"(?:i prefer|i like|i dislike|my preferences? (?:is|are)|my favou?rite .+ is)\s+.+",
         text,
@@ -398,7 +419,10 @@ class PersistentMemoryFacade:
             if score:
                 scored.append((score, value))
         scored.sort(key=lambda item: item[0], reverse=True)
-        return [value[:2000] for _, value in scored[:5]]
+        canonical = set(profile.values())
+        return [
+            value if value in canonical else value[:2000] for _, value in scored[:5]
+        ]
 
     def _summary(self, summary):
         if not isinstance(summary, dict) or not isinstance(
@@ -422,13 +446,11 @@ class PersistentMemoryFacade:
                 values.append(section.replace("_", " ") + ":\n" + "\n".join(accepted))
         return "\n\n".join(values)
 
-    def _blocks(self, *, include_summary=True, summary=None):
+    def _blocks(
+        self, *, include_summary=True, summary=None, profile_budget_chars=16000
+    ):
         profile = self.personal_store.get_profile()
-        fields = {field: profile[field] for field in _PROFILE_LABELS}
-        user = (
-            "AUTHORITATIVE USER PROFILE (blank/null fields remain absent):\n"
-            + json.dumps(fields, ensure_ascii=False)
-        )
+        user = profile_context(profile, budget_chars=profile_budget_chars)
         profile_block = user
         summary_block = ""
         notes = {"user": "", "memory": ""}
@@ -477,26 +499,36 @@ class PersistentMemoryFacade:
         if type(budget_chars) is not int or not 1 <= budget_chars <= 128000:
             raise ValueError("budget_chars must be between 1 and 128000")
         with self._lock:
-            blocks = self._blocks(include_summary=include_summary, summary=summary)
+            blocks = self._blocks(
+                include_summary=include_summary,
+                summary=summary,
+                profile_budget_chars=budget_chars,
+            )
             priority = "\n\n".join(
                 block for block in (blocks["profile"], blocks["summary"]) if block
             )
-            remaining = max(0, budget_chars - len(priority) - 4)
+            remaining = max(0, budget_chars - len(priority.encode("utf-8")) - 4)
             categories = [
                 blocks[key].strip()
                 for key in ("user_notes", "memory_notes")
                 if blocks[key]
             ]
             allowance = remaining // len(categories) if categories else 0
-            notes = [block[:allowance] for block in categories if allowance]
-            return "\n\n".join([priority, *notes])[:budget_chars]
+            notes = [
+                bounded_context_text(block, allowance)
+                for block in categories
+                if allowance
+            ]
+            return bounded_context_text("\n\n".join([priority, *notes]), budget_chars)
 
     def get_system_prompt_snapshot(self, target=None, *, include_summary=True):
         if target is None:
             return self.snapshot(include_summary=include_summary)
         target = _target(target)
         with self._lock:
-            return self._blocks(include_summary=include_summary)[target][:16000]
+            return bounded_context_text(
+                self._blocks(include_summary=include_summary)[target], 16000
+            )
 
     def revision_token(self):
         with self._lock:

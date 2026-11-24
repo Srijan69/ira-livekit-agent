@@ -14,81 +14,16 @@ from __future__ import annotations
 import pytest
 
 from browser import BrowserController
-from tests.test_browser_multitab import (
+from tests.fixtures.playwright_fakes import (
     FakeElement,
-    FakeMultiTabDriver,
     FakeOption,
+    FakePage,
     FakeSelectElement,
-    FakeTab,
-    _controller,
+    controller_with,
 )
 
-# ---------------------------------------------------------------------------
-# Test Double Extensions for Edge Cases
-# ---------------------------------------------------------------------------
-
-
-class StressFakeOption(FakeOption):
-    """Option supporting disabled state and DOM properties."""
-
-    def __init__(
-        self,
-        text: str,
-        value: str | None = None,
-        selected: bool = False,
-        disabled: bool = False,
-    ):
-        super().__init__(text, value=value, selected=selected)
-        self._disabled = disabled
-
-    def is_enabled(self) -> bool:
-        return not self._disabled
-
-    def get_attribute(self, name: str):
-        if name == "disabled":
-            return "true" if self._disabled else None
-        return super().get_attribute(name)
-
-    def get_dom_attribute(self, name: str):
-        if name == "disabled":
-            return "true" if self._disabled else None
-        return super().get_dom_attribute(name)
-
-    def click(self) -> None:
-        if self._disabled:
-            raise RuntimeError("Cannot click disabled option")
-        super().click()
-
-
-class StressFakeSelectElement(FakeSelectElement):
-    """Select supporting disabled options and custom option sets."""
-
-    def __init__(
-        self,
-        name: str = "category",
-        options: list[FakeOption] | None = None,
-        disabled: bool = False,
-    ):
-        super().__init__(name=name, options=options)
-        if options is not None:
-            self.options = list(options)
-        self._disabled = disabled
-        if disabled:
-            self._attrs["disabled"] = "true"
-
-    def is_enabled(self) -> bool:
-        return not self._disabled
-
-    def select_option(self, value: str) -> None:
-        self.selected_value = value
-        for opt in self.options:
-            if opt.text == value or getattr(opt, "_value", None) == value:
-                if not opt.is_enabled():
-                    raise RuntimeError(f"Cannot select disabled option '{value}'")
-                opt._selected = True
-            else:
-                opt._selected = False
-
+StressFakeOption = FakeOption
+StressFakeSelectElement = FakeSelectElement
 
 # ===========================================================================
 # 1. Date Inputs: Boundary & Malformed Tests
@@ -120,16 +55,17 @@ class TestDateInputsEdgeCases:
     )
     def test_type_text_date_inputs(self, date_str: str, expected_valid: bool):
         date_el = FakeElement("input", type="date", name="birth_date")
-        driver = FakeMultiTabDriver([FakeTab("h1", elements=[date_el])])
-        controller = _controller(driver)
+        controller = controller_with(FakePage([date_el]))
         controller.list_elements()
 
+        if not expected_valid and date_str:
+            with pytest.raises(RuntimeError, match="verified"):
+                controller.type_text(1, date_str)
+            assert date_el.input_value() == ""
+            return
         result = controller.type_text(1, date_str)
         assert "Typed into the textbox" in result
-        assert date_el.cleared is True
-        assert date_str in date_el.typed
-        # Verify execute_script was called with event dispatch for input/change
-        assert any("dispatchEvent" in s for s in driver.scripts)
+        assert date_el.input_value() == date_str
 
     def test_validate_value_field_accepts_date_and_time_variants(self):
         for field_type in ("date", "datetime-local", "month", "time"):
@@ -184,15 +120,18 @@ class TestDatetimeAndMonthInputs:
     )
     def test_type_text_datetime_local(self, dt_str: str):
         dt_el = FakeElement("input", type="datetime-local", name="appointment")
-        driver = FakeMultiTabDriver([FakeTab("h1", elements=[dt_el])])
-        controller = _controller(driver)
+        controller = controller_with(FakePage([dt_el]))
         controller.list_elements()
 
+        if dt_str == "invalid-dt":
+            with pytest.raises(RuntimeError, match="verified"):
+                controller.type_text(1, dt_str)
+            return
         result = controller.type_text(1, dt_str)
         assert "Typed into the textbox" in result
-        assert dt_el.cleared is True
-        assert dt_str in dt_el.typed
-        assert any("dispatchEvent" in s for s in driver.scripts)
+        assert dt_el.input_value() == (
+            dt_str.removesuffix(":00") if dt_str.endswith(":00") else dt_str
+        )
 
     @pytest.mark.parametrize(
         "month_str",
@@ -207,15 +146,16 @@ class TestDatetimeAndMonthInputs:
     )
     def test_type_text_month(self, month_str: str):
         month_el = FakeElement("input", type="month", name="grad_month")
-        driver = FakeMultiTabDriver([FakeTab("h1", elements=[month_el])])
-        controller = _controller(driver)
+        controller = controller_with(FakePage([month_el]))
         controller.list_elements()
 
+        if month_str in {"2024-13", "invalid-month"}:
+            with pytest.raises(RuntimeError, match="verified"):
+                controller.type_text(1, month_str)
+            return
         result = controller.type_text(1, month_str)
         assert "Typed into the textbox" in result
-        assert month_el.cleared is True
-        assert month_str in month_el.typed
-        assert any("dispatchEvent" in s for s in driver.scripts)
+        assert month_el.input_value() == month_str
 
 
 # ===========================================================================
@@ -234,16 +174,15 @@ class TestSelectDropdownEdgeCases:
             FakeOption("Manager", value="mgr"),
         ]
         sel_el = FakeSelectElement(options=options)
-        driver = FakeMultiTabDriver([FakeTab("h1", elements=[sel_el])])
-        controller = _controller(driver)
+        controller = controller_with(FakePage([sel_el]))
         controller.list_elements()
 
-        # Selecting by visible text selects the first matching option
-        result = controller.select_dropdown(1, "Engineer")
-        assert "Selected 'Engineer'" in result
-        assert sel_el.selected_value in ("eng_frontend", "Engineer")
+        with pytest.raises(ValueError, match="ambiguous"):
+            controller.select_dropdown(1, "Engineer")
+        assert sel_el.actions == []
 
         # Selecting specifically by unique value targets the second option
+        controller.list_elements()
         result2 = controller.select_dropdown(1, "eng_backend")
         assert "Selected 'eng_backend'" in result2
         assert sel_el.selected_value == "eng_backend"
@@ -256,8 +195,7 @@ class TestSelectDropdownEdgeCases:
             FakeOption("United Kingdom", value="UK"),
         ]
         sel_el = FakeSelectElement(options=options)
-        driver = FakeMultiTabDriver([FakeTab("h1", elements=[sel_el])])
-        controller = _controller(driver)
+        controller = controller_with(FakePage([sel_el]))
         controller.list_elements()
 
         result = controller.select_dropdown(1, "USA")
@@ -282,8 +220,7 @@ class TestSelectDropdownEdgeCases:
             FakeOption(label, value=value),
         ]
         sel_el = FakeSelectElement(options=options)
-        driver = FakeMultiTabDriver([FakeTab("h1", elements=[sel_el])])
-        controller = _controller(driver)
+        controller = controller_with(FakePage([sel_el]))
         controller.list_elements()
 
         # Match by special label
@@ -291,6 +228,7 @@ class TestSelectDropdownEdgeCases:
         assert f"Selected '{label}'" in res_label
 
         # Match by special value
+        controller.list_elements()
         res_val = controller.select_dropdown(1, value)
         assert f"Selected '{value}'" in res_val
 
@@ -300,8 +238,7 @@ class TestSelectDropdownEdgeCases:
             FakeOption("Multiple    Spaces", value="multi_space"),
         ]
         sel_el = FakeSelectElement(options=options)
-        driver = FakeMultiTabDriver([FakeTab("h1", elements=[sel_el])])
-        controller = _controller(driver)
+        controller = controller_with(FakePage([sel_el]))
         controller.list_elements()
 
         # Search query with extra whitespace
@@ -309,6 +246,7 @@ class TestSelectDropdownEdgeCases:
         assert "Selected" in result
 
         # Search query with clean text for padded option
+        controller.list_elements()
         result2 = controller.select_dropdown(1, "Leading and Trailing")
         assert "Selected" in result2
 
@@ -318,8 +256,7 @@ class TestSelectDropdownEdgeCases:
             FakeOption("Option 1", value="opt1"),
         ]
         sel_el = FakeSelectElement(options=options)
-        driver = FakeMultiTabDriver([FakeTab("h1", elements=[sel_el])])
-        controller = _controller(driver)
+        controller = controller_with(FakePage([sel_el]))
         controller.list_elements()
 
         # Selecting empty value
@@ -328,13 +265,12 @@ class TestSelectDropdownEdgeCases:
 
     def test_dropdown_with_no_options_raises_helpful_error(self):
         sel_el = StressFakeSelectElement(options=[])
-        driver = FakeMultiTabDriver([FakeTab("h1", elements=[sel_el])])
-        controller = _controller(driver)
+        controller = controller_with(FakePage([sel_el]))
         controller.list_elements()
 
         with pytest.raises(ValueError) as exc:
             controller.select_dropdown(1, "any_option")
-        assert "has no selectable options" in str(exc.value)
+        assert "Available options: none" in str(exc.value)
 
     @pytest.mark.parametrize(
         "query,expected_match",
@@ -353,8 +289,7 @@ class TestSelectDropdownEdgeCases:
             FakeOption("Product Manager", value="pm"),
         ]
         sel_el = FakeSelectElement(options=options)
-        driver = FakeMultiTabDriver([FakeTab("h1", elements=[sel_el])])
-        controller = _controller(driver)
+        controller = controller_with(FakePage([sel_el]))
         controller.list_elements()
 
         result = controller.select_dropdown(1, query)
@@ -383,14 +318,13 @@ class TestSelectDropdownNonSelectElements:
     def test_select_dropdown_rejects_non_select(self, tag: str, role: str, attrs: dict):
         text = attrs.pop("text", "")
         el = FakeElement(tag, text=text, **attrs)
-        driver = FakeMultiTabDriver([FakeTab("h1", elements=[el])])
-        controller = _controller(driver)
+        controller = controller_with(FakePage([el]))
         controller.list_elements()
 
         with pytest.raises(ValueError) as exc:
             controller.select_dropdown(1, "some_option")
         err_msg = str(exc.value)
-        assert f"is a {tag}, not a <select> dropdown" in err_msg
+        assert "not a select dropdown" in err_msg
 
 
 # ===========================================================================
@@ -403,15 +337,14 @@ class TestTypeTextOnSelectElement:
 
     def test_type_text_on_select_rejects_and_guides(self):
         sel_el = FakeSelectElement(name="country")
-        driver = FakeMultiTabDriver([FakeTab("h1", elements=[sel_el])])
-        controller = _controller(driver)
+        controller = controller_with(FakePage([sel_el]))
         controller.list_elements()
 
         with pytest.raises(ValueError) as exc:
             controller.type_text(1, "Canada")
         err_msg = str(exc.value)
-        assert "is a select dropdown, not a text field" in err_msg
-        assert "Use select_dropdown to choose an option." in err_msg
+        assert "cannot be typed" in err_msg
+        assert "use select_dropdown" in err_msg
 
     def test_validate_value_field_writable_rejects_select(self):
         sel_el = FakeSelectElement(name="country")
@@ -439,24 +372,22 @@ class TestDisabledSelectAndOptions:
 
     def test_disabled_select_via_dom_attribute_rejected(self):
         sel_el = StressFakeSelectElement(disabled=True)
-        driver = FakeMultiTabDriver([FakeTab("h1", elements=[sel_el])])
-        controller = _controller(driver)
+        controller = controller_with(FakePage([sel_el]))
         controller.list_elements()
 
         with pytest.raises(ValueError) as exc:
             controller.select_dropdown(1, "Engineering")
-        assert "Cannot select option from disabled dropdown" in str(exc.value)
+        assert "Cannot select an option from a disabled dropdown" in str(exc.value)
 
     def test_disabled_select_via_is_enabled_false_rejected(self):
         sel_el = FakeSelectElement()
         sel_el._attrs["disabled"] = ""  # HTML5 boolean attribute: <select disabled>
-        driver = FakeMultiTabDriver([FakeTab("h1", elements=[sel_el])])
-        controller = _controller(driver)
+        controller = controller_with(FakePage([sel_el]))
         controller.list_elements()
 
         with pytest.raises(ValueError) as exc:
             controller.select_dropdown(1, "Engineering")
-        assert "Cannot select option from disabled dropdown" in str(exc.value)
+        assert "Cannot select an option from a disabled dropdown" in str(exc.value)
 
     def test_disabled_option_within_enabled_select(self):
         """CRITICAL CHALLENGE: Dropdown has enabled and disabled options."""
@@ -466,20 +397,14 @@ class TestDisabledSelectAndOptions:
             StressFakeOption("Active Option 2", value="act2", disabled=False),
         ]
         sel_el = StressFakeSelectElement(options=options, disabled=False)
-        driver = FakeMultiTabDriver([FakeTab("h1", elements=[sel_el])])
-        controller = _controller(driver)
+        controller = controller_with(FakePage([sel_el]))
         controller.list_elements()
 
         # Selecting active option succeeds
         res = controller.select_dropdown(1, "Active Option 1")
         assert "Selected 'Active Option 1'" in res
 
-        # Attempting to select disabled option
-        # What does select_dropdown do when the option is disabled?
-        # Let's inspect behavior:
-        try:
-            res_dis = controller.select_dropdown(1, "Disabled Option")
-            # If it succeeded, check if the disabled option was actually clicked or selected
-            print(f"Disabled option select returned: {res_dis}")
-        except Exception as e:
-            print(f"Disabled option select raised: {type(e).__name__}: {e}")
+        controller.list_elements()
+        with pytest.raises(ValueError, match="disabled option"):
+            controller.select_dropdown(1, "Disabled Option")
+        assert sel_el.selected_value == "act1"

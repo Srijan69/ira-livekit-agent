@@ -82,6 +82,37 @@ async def test_profile_read_save_reset_and_revision_conflict(client):
     assert cleared["revision"] == 2
 
 
+async def test_expanded_profile_http_save_reset_clears_every_field(client, store):
+    extra = {
+        "location": "Hyderabad",
+        "languages": "English, Telugu",
+        "interests": "Astronomy",
+        "goals": "Build IRA",
+        "about_me": "I learn by building projects.",
+    }
+    response = await client.patch(
+        "/profile",
+        json={"name": "Avery", **extra, "expected_revision": 0},
+        headers=AUTH,
+    )
+    assert response.status == 200
+    saved = await response.json()
+    assert all(saved[field] == value for field, value in extra.items())
+    response = await client.post(
+        "/profile/reset", json={"expected_revision": 0}, headers=AUTH
+    )
+    assert response.status == 409
+    assert store.get_profile()["goals"] == "Build IRA"
+    response = await client.post(
+        "/profile/reset", json={"expected_revision": 1}, headers=AUTH
+    )
+    assert response.status == 200
+    cleared = await response.json()
+    assert all(cleared[field] == "" for field in ["name", *extra])
+    assert cleared["age"] is None
+    assert cleared["revision"] == 2
+
+
 @pytest.mark.parametrize(
     "path,method,payload",
     [

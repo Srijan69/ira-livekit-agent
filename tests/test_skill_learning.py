@@ -96,3 +96,63 @@ def test_curator_only_suggests_archival_and_honors_pins(tmp_path):
     assert [s["slug"] for s in suggestions] == ["open-notes"]
     assert store.get("open-notes") is not None
     assert store.get("pinned").pinned
+
+
+def test_learning_adaptive_run_requires_task_lineage_and_preserves_parameters(tmp_path):
+    from test_task_routing import RESEARCH, request
+
+    from skill_learning import learn_from_run
+    from skills import SkillCatalog
+    from task_routing import decide_task
+
+    catalog = SkillCatalog(tmp_path / "procedures")
+    catalog.create_skill("research-topic", RESEARCH, category="web")
+    info = catalog.get_skill("research-topic")
+    decision = decide_task(
+        request(),
+        catalog,
+        selected=info.canonical_id,
+        explicit=True,
+        available_tools=("browse_to", "read_page"),
+    )
+    runs = catalog.state_store
+    runs.load_run("evidence", info, decision)
+    with pytest.raises(ValueError, match="verified"):
+        learn_from_run(
+            "evidence",
+            "New research",
+            SkillStore(tmp_path / "compiled"),
+            runs.run_store,
+            catalog=catalog,
+        )
+    runs.record_action(
+        "evidence",
+        "request-one",
+        {"action_id": "read", "tool": "read_page", "outcome": "observed"},
+    )
+    runs.finish_run(
+        "evidence",
+        "request-one",
+        "done",
+        criteria={"read_sources": True, "summary_with_sources": True},
+    )
+    learned = learn_from_run(
+        "evidence",
+        "New research",
+        SkillStore(tmp_path / "compiled"),
+        runs.run_store,
+        catalog=catalog,
+    )
+    assert learned.name == "New research"
+    assert "Microsoft" not in learned.body
+    assert "{subject}" in learned.body
+    assert catalog.state_store.state(learned)["state"] == "draft"
+    wrong = dict(runs.run("evidence"), request_id="other")
+    with pytest.raises(ValueError, match="task"):
+        learn_from_run(
+            "evidence",
+            "Wrong lineage",
+            SkillStore(tmp_path / "compiled"),
+            Runs(wrong),
+            catalog=catalog,
+        )

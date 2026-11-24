@@ -5,6 +5,8 @@ type Proxy = Omit<PersonalMemoryApi, "onChanged">;
 const invalid = { error: "Invalid profile or memory request." };
 const integer = (value: unknown, min: number, max: number) => typeof value === "number" && Number.isInteger(value) && value >= min && value <= max;
 const text = (value: unknown, max: number) => typeof value === "string" && value.length <= max && !/[\x00-\x08\x0b\x0c\x0e-\x1f]/.test(value);
+const profileText = (value: unknown, max: number) => text(value, max) && typeof value === "string" && !/[\x7f-\x9f]/.test(value);
+const extraProfileFields = { location: 200, languages: 200, interests: 1500, goals: 1500, about_me: 4000 } as const;
 
 /** Fixed loopback operations; personal data stays out of URLs except search. */
 export function createPersonalMemoryProxy(callBridge: BridgeRequest, changed: () => void = () => {}): Proxy {
@@ -30,10 +32,12 @@ export function createPersonalMemoryProxy(callBridge: BridgeRequest, changed: ()
   return {
     profile: () => request("/profile", "GET"),
     saveProfile(input) {
-      if (!input || !text(input.name, 120) || !text(input.occupation, 200) || !text(input.preferences, 4000)
+      if (!input || !profileText(input.name, 120) || !profileText(input.occupation, 200) || !profileText(input.preferences, 4000)
+        || Object.entries(extraProfileFields).some(([key, max]) => { const value = input[key as keyof typeof extraProfileFields]; return value !== undefined && !profileText(value, max); })
         || (input.age !== null && !integer(input.age, 0, 130))
         || (input.expected_revision !== undefined && !integer(input.expected_revision, 0, Number.MAX_SAFE_INTEGER))) return Promise.resolve(invalid);
-      return request("/profile", "PATCH", { name: input.name, age: input.age, occupation: input.occupation, preferences: input.preferences, ...(input.expected_revision === undefined ? {} : { expected_revision: input.expected_revision }) });
+      const extra = Object.fromEntries(Object.keys(extraProfileFields).filter((key) => input[key as keyof typeof extraProfileFields] !== undefined).map((key) => [key, input[key as keyof typeof extraProfileFields]]));
+      return request("/profile", "PATCH", { name: input.name, age: input.age, occupation: input.occupation, preferences: input.preferences, ...extra, ...(input.expected_revision === undefined ? {} : { expected_revision: input.expected_revision }) });
     },
     resetProfile: () => request("/profile/reset", "POST", {}),
     settings: () => request("/memory/settings", "GET"),

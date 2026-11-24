@@ -38,6 +38,11 @@ const blankProfile = {
   age: null,
   occupation: "",
   preferences: "",
+  location: "",
+  languages: "",
+  interests: "",
+  goals: "",
+  about_me: "",
   revision: 0,
   updated_at: null,
 };
@@ -163,6 +168,11 @@ global.fetch = async (address, init = {}) => {
       age: body.age,
       occupation: body.occupation,
       preferences: body.preferences,
+      location: body.location,
+      languages: body.languages,
+      interests: body.interests,
+      goals: body.goals,
+      about_me: body.about_me,
       revision: state.profile.revision + 1,
       updated_at: timestamp,
     };
@@ -368,7 +378,10 @@ app.whenReady().then(async () => {
       "stopped",
     );
     await clickText("Settings");
-    await click("#settings-tab-profile");
+    assert.equal(await read("document.querySelectorAll('[role=tab]').length"), 2);
+    assert.equal(await read("Boolean(document.querySelector('#settings-tab-profile'))"), false);
+    await clickText("System Controls");
+    await click("#system-tab-profile");
     await ready("Save profile");
     assert.match(
       await read("document.querySelector('nav').innerText"),
@@ -381,6 +394,8 @@ app.whenReady().then(async () => {
     await change("#profile-name", "Ada Lovelace");
     await change("#profile-age", "36");
     await change("#profile-occupation", "Research engineer");
+    const details = { location: "Hyderabad, India", languages: "English, Telugu", interests: "Astronomy and engineering", goals: "Build a telescope", about_me: "I enjoy learning.\nI spend weekends observing the sky." };
+    for (const [field, value] of Object.entries(details)) await change(`#profile-${field}`, value);
     await change(
       "#profile-preferences",
       "Use concise explanations and metric units. I enjoy astronomy and practical examples.",
@@ -393,6 +408,7 @@ app.whenReady().then(async () => {
     );
     assert.equal(loadState().profile.name, "Ada Lovelace");
     assert.equal(loadState().profile.age, 36);
+    for (const [field, value] of Object.entries(details)) assert.equal(loadState().profile[field], value);
     assert.match(
       await read("document.querySelector('nav').innerText"),
       /AL\s+Ada Lovelace/,
@@ -406,9 +422,15 @@ app.whenReady().then(async () => {
         "profile-actions",
         width,
         height,
-        "#settings-panel-profile .connection-save-row",
+        "#system-panel-profile .connection-save-row",
       );
     }
+    // Reload the actual renderer to verify all expanded details return via IPC.
+    window.webContents.reload();
+    await waitFor(() => read("Boolean(document.querySelector('nav'))").catch(() => false), Boolean, "expanded profile reload");
+    await clickText("System Controls");
+    await ready("Save profile");
+    for (const [field, value] of Object.entries(details)) assert.equal(await read(`document.querySelector('#profile-${field}').value`), value);
     await change("#profile-age", "");
     await clickText("Save profile");
     await waitFor(
@@ -418,13 +440,13 @@ app.whenReady().then(async () => {
     );
     await ready("Save profile");
 
-    // Keyboard selection traverses all four Settings sections.
+    // Keyboard selection traverses the two System Controls sections.
     await read(
-      "document.querySelector('#settings-tab-profile').dispatchEvent(new KeyboardEvent('keydown', { key: 'End', bubbles: true }))",
+      "document.querySelector('#system-tab-profile').dispatchEvent(new KeyboardEvent('keydown', { key: 'End', bubbles: true }))",
     );
     assert.equal(
       await read("document.activeElement.id"),
-      "settings-tab-memory",
+      "system-tab-memory",
     );
     await ready("Save memory settings");
     assert.equal(
@@ -603,7 +625,7 @@ app.whenReady().then(async () => {
     assert.equal(loadState().profile.name, "Ada Lovelace");
     await screenshot("cleared", 1180, 800, ".memory-summary");
 
-    await click("#settings-tab-profile");
+    await click("#system-tab-profile");
     await clickText("Reset profile");
     assert.equal(
       loadState().profile.name,
@@ -621,6 +643,7 @@ app.whenReady().then(async () => {
     assert.equal(reset.age, null);
     assert.equal(reset.occupation, "");
     assert.equal(reset.preferences, "");
+    for (const field of Object.keys(details)) assert.equal(reset[field], "");
     assert.match(
       await read("document.querySelector('nav').innerText"),
       /Your profile/,
@@ -637,8 +660,8 @@ app.whenReady().then(async () => {
       Boolean,
       "renderer reload",
     );
-    await clickText("Settings");
-    await click("#settings-tab-profile");
+    await clickText("System Controls");
+    await click("#system-tab-profile");
     await ready("Save profile");
     assert.equal(
       await read("document.querySelector('#profile-name').value"),
@@ -648,7 +671,7 @@ app.whenReady().then(async () => {
       await read("document.querySelector('nav').innerText"),
       /Your profile/,
     );
-    await click("#settings-tab-memory");
+    await click("#system-tab-memory");
     await ready("Save memory settings");
     assert.equal(
       await read("document.querySelector('#memory-context_budget').value"),
